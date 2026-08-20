@@ -1,0 +1,26 @@
+# ── Key material — NEVER commit ────────────────────────────────────────────
+# cmd/payarc reads a secp256k1 key from a file. Even a testnet key on a chain
+# where the gas token is USDC controls real transferable value.
+*.key
+*.pem
+arc.key
+id.json
+keystore/
+.env
+.env.*
+
+# ── Build artifacts ────────────────────────────────────────────────────────
+/bin/
+*.test
+*.so
+dist/
+
+# ── Fuzz corpora ───────────────────────────────────────────────────────────
+# Seed corpora belong in the tree; machine-generated ones do not.
+testdata/fuzz/
+
+# ── OS / editor ────────────────────────────────────────────────────────────
+.DS_Store
+*.swp
+.idea/
+.vscode/
