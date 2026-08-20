@@ -14,8 +14,8 @@ jobs:
     name: gofmt · vet · build · test (default build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           check-latest: false
@@ -48,8 +48,8 @@ jobs:
     name: settlement command (-tags arc)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           check-latest: false
@@ -86,8 +86,8 @@ jobs:
     name: fuzz the guard
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           check-latest: false
@@ -98,8 +98,8 @@ jobs:
     name: govulncheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           check-latest: false
@@ -117,6 +117,13 @@ jobs:
           "$(go env GOPATH)"/bin/govulncheck ./...
           "$(go env GOPATH)"/bin/govulncheck -tags arc ./...
 
-# TODO(supply-chain): pin these actions to commit SHAs — tag refs are mutable.
-#   go install github.com/suzuki-shunsuke/pinact/cmd/pinact@latest
-#   pinact run .github/workflows/*.yml
+# Actions are pinned to commit SHAs, not tags. A tag is a mutable pointer: an
+# attacker who compromises an action's repository can move v7 to point at code
+# you never reviewed, and every workflow that says @v7 picks it up on the next
+# run. A SHA cannot be moved. The trailing comment records which release the
+# SHA was, so a human can still read the file.
+#
+# To update, resolve the new tag and replace both the SHA and the comment:
+#   git ls-remote https://github.com/actions/checkout refs/tags/vX.Y.Z
+# or run: go install github.com/suzuki-shunsuke/pinact/cmd/pinact@latest
+#         pinact run .github/workflows/*.yml
