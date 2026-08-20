@@ -62,6 +62,19 @@ CGO_ENABLED=0 go build -tags arc ./cmd/payarc
 The first MUST fail with `undefined: payarcRequiresCGO_ENABLED_0_seeThisFile`.
 The second MUST succeed.
 
+**Every tool you point at the tagged path needs `CGO_ENABLED=0` too.** The guard
+is a compile error, so anything that type-checks `-tags arc` — `govulncheck`,
+`staticcheck`, `gopls`, your editor's language server — hits it and reports
+`undefined: payarcRequiresCGO_ENABLED_0_seeThisFile` instead of doing its job.
+That is the guard working, not a bug, but it is a surprise the first time:
+
+```sh
+CGO_ENABLED=0 govulncheck -tags arc ./...
+```
+
+For an editor, set `CGO_ENABLED=0` and the `arc` build tag in the Go language
+server settings, or `cmd/payarc` will show as one long red squiggle.
+
 ---
 
 ## 2. Prove the controls fire — offline, no key, no funds

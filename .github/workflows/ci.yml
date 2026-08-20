@@ -103,9 +103,17 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: false
+      # CGO_ENABLED=0 is not optional here. govulncheck type-checks the
+      # packages it scans, so scanning `-tags arc` with cgo on hits
+      # cmd/payarc/nocgo.go's deliberate compile error and the job dies with
+      # "undefined: payarcRequiresCGO_ENABLED_0_seeThisFile" rather than a
+      # vulnerability report. Every tool pointed at the tagged path — gopls,
+      # staticcheck, an IDE — needs the same.
       - name: govulncheck
+        env:
+          CGO_ENABLED: "0"
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           "$(go env GOPATH)"/bin/govulncheck ./...
           "$(go env GOPATH)"/bin/govulncheck -tags arc ./...
 
