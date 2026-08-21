@@ -2,6 +2,7 @@ package evm
 
 import (
 	"errors"
+	"math/big"
 	"strings"
 	"testing"
 
@@ -85,4 +86,68 @@ func TestArcProfileConstants(t *testing.T) {
 	// ("build the transaction for the bound chain" → tx.ChainID = b.ChainID).
 	// A value type cannot alias.
 	var _ uint64 = ArcTestnetChainID
+}
+
+// The native/ERC-20 relation is truncation, not equality. Gas is metered at
+// 18-decimal granularity, so an account that has paid gas holds a native
+// balance that is not a whole number of micro-USDC — and demanding exact
+// equality passes on a freshly funded wallet, then fails on its second
+// transaction. That is a fail-closed bug, and it is what this test exists to
+// stop coming back.
+func TestAssertNativeViewConsistent(t *testing.T) {
+	scale := NativeScale()
+	erc20 := big.NewInt(19_898_447) // 19.898447 USDC
+	exact := new(big.Int).Mul(erc20, scale)
+
+	cases := []struct {
+		name     string
+		native   *big.Int
+		wantDust int64
+		wantErr  bool
+	}{
+		{"freshly funded, no gas paid yet", new(big.Int).Set(exact), 0, false},
+		{"after gas: the real observed residue", new(big.Int).Add(exact, big.NewInt(50_000_000_000)), 50_000_000_000, false},
+		{"one native unit of dust", new(big.Int).Add(exact, big.NewInt(1)), 1, false},
+		{"dust one below the scale", new(big.Int).Add(exact, new(big.Int).Sub(scale, big.NewInt(1))), 999_999_999_999, false},
+		{"dust equal to the scale means erc20 truncated wrong", new(big.Int).Add(exact, scale), 0, true},
+		{"native below the erc20 view", new(big.Int).Sub(exact, big.NewInt(1)), 0, true},
+		{"native is zero while erc20 is not", big.NewInt(0), 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dust, err := AssertNativeViewConsistent(c.native, erc20)
+			if c.wantErr {
+				if !errors.Is(err, ErrNativeViewInconsistent) {
+					t.Fatalf("got %v, want ErrNativeViewInconsistent", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("got %v, want nil", err)
+			}
+			if dust.Int64() != c.wantDust {
+				t.Fatalf("dust = %s, want %d", dust, c.wantDust)
+			}
+		})
+	}
+
+	// Both zero is a consistent, if uninteresting, pair.
+	if _, err := AssertNativeViewConsistent(big.NewInt(0), big.NewInt(0)); err != nil {
+		t.Fatalf("zero/zero: got %v, want nil", err)
+	}
+	for _, bad := range [][2]*big.Int{{nil, erc20}, {exact, nil}, {big.NewInt(-1), erc20}, {exact, big.NewInt(-1)}} {
+		if _, err := AssertNativeViewConsistent(bad[0], bad[1]); !errors.Is(err, ErrNativeViewInconsistent) {
+			t.Fatalf("native=%v erc20=%v: got %v, want ErrNativeViewInconsistent", bad[0], bad[1], err)
+		}
+	}
+
+	// NativeScale must hand back a fresh value each call.
+	a, b := NativeScale(), NativeScale()
+	if a == b {
+		t.Fatal("NativeScale returned a shared pointer")
+	}
+	a.SetInt64(1)
+	if b.Cmp(new(big.Int).Exp(big.NewInt(10), big.NewInt(12), nil)) != 0 {
+		t.Fatal("mutating one result changed another")
+	}
 }

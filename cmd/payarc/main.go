@@ -58,18 +58,17 @@ import (
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm"
 )
 
-// nativePerMicroUSDC is the ratio between USDC's native view (18 decimals) and
-// its ERC-20 view (6 decimals) on Arc. It applies ONLY to the fee ceiling —
-// never to a payment amount — and it is exact integer arithmetic.
+// The micro-USDC -> native conversion for the fee ceiling lives in
+// settle/evm.NativeScale(). It applies ONLY to the ceiling — never to a payment
+// amount — and it is exact integer arithmetic.
 //
-// §A.5.11 says the settlement path never converts between the two views, and
-// a ceiling expressed in the same unit as -amount is a deliberate, narrow
-// exception so an operator does not have to type 1e18-scale numbers. The
-// exception is only safe because the ratio is CHECKED at run time against the
-// chain rather than assumed: see assertNativeRatio. An unchecked constant here
-// would silently multiply the ceiling by 10^12 if Arc's native view were not 18
-// decimals, which would disable §A.4 assertion 7 while still printing PASS.
-var nativePerMicroUSDC = new(big.Int).Exp(big.NewInt(10), big.NewInt(12), nil)
+// §A.5.11 says the settlement path never converts between the two views; a
+// ceiling expressed in the same unit as -amount is a deliberate, narrow
+// exception so an operator does not type 1e18-scale numbers. The exception is
+// safe only because the relation is CHECKED against the chain each run rather
+// than assumed — see assertNativeRatio. An unchecked constant would silently
+// multiply the ceiling by 10^12 if Arc's native view were not 18 decimals,
+// disabling §A.4 assertion 7 while still printing PASS.
 
 const (
 	// confirmTimeout bounds how long we wait for inclusion before reporting
@@ -237,7 +236,7 @@ func main() {
 		fatal("DENY_UNAVAILABLE", errors.New("latest header carries no base fee — this endpoint does not look EIP-1559"))
 	}
 	feeCap := new(big.Int).Add(new(big.Int).Mul(head.BaseFee, big.NewInt(2)), tip)
-	maxGasCost := new(big.Int).Mul(new(big.Int).SetUint64(*maxFee), nativePerMicroUSDC)
+	maxGasCost := new(big.Int).Mul(new(big.Int).SetUint64(*maxFee), evm.NativeScale())
 
 	p := plan{
 		asset: asset, merchant: merchant, payer: payer,
@@ -381,23 +380,27 @@ func assertSelector() error {
 
 // assertNativeRatio checks the 18-vs-6 decimal assumption against the chain
 // instead of trusting it. On Arc the native balance and the ERC-20 balance are
-// two views of THE SAME funds, so they must differ by exactly 10^12. If they do
-// not, the fee ceiling is denominated in something other than what we think and
-// §A.4 assertion 7 would be off by twelve orders of magnitude — while still
-// printing PASS. That is the failure a constant with no check produces.
+// two views of THE SAME funds. If that relation does not hold, the fee ceiling
+// is denominated in something other than what we think and §A.4 assertion 7
+// would be off by twelve orders of magnitude — while still printing PASS. That
+// is the failure a constant with no check produces.
+//
+// The relation is truncation, not equality: gas is metered at native
+// granularity, so any account that has paid gas holds a native balance that is
+// not a whole number of micro-USDC. The arithmetic lives in settle/evm, where
+// it is unit-tested; this function only fetches and reports.
 func assertNativeRatio(ctx context.Context, c *ethclient.Client, payer common.Address, erc20 *big.Int) error {
 	native, err := c.BalanceAt(ctx, payer, nil)
 	if err != nil {
 		return fmt.Errorf("native balance: %w", err)
 	}
-	want := new(big.Int).Mul(erc20, nativePerMicroUSDC)
-	if native.Cmp(want) != 0 {
-		return fmt.Errorf("the native and ERC-20 views of USDC disagree: native %s, erc20 %s × 10^12 = %s.\n"+
-			"  This profile assumes one pool of funds at 18 and 6 decimals (SPEC-X402-ARC §A.1).\n"+
-			"  If that is wrong here, the fee ceiling is meaningless — refusing rather than settling on the assumption",
-			native, erc20, want)
+	dust, err := evm.AssertNativeViewConsistent(native, erc20)
+	if err != nil {
+		return fmt.Errorf("%w.\n"+
+			"  This profile assumes one pool of funds viewed at 18 and 6 decimals (SPEC-X402-ARC §A.1).\n"+
+			"  If that is wrong here, the fee ceiling is meaningless — refusing rather than settling on the assumption", err)
 	}
-	fmt.Printf("decimals:  native/ERC-20 ratio confirmed at 10^12 against the chain\n")
+	fmt.Printf("decimals:  native/ERC-20 relation confirmed against the chain (10^12, residue %s native units)\n", dust)
 	return nil
 }
 

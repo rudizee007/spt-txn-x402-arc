@@ -50,6 +50,10 @@ unpublished material, in code, comments, commit messages, or tests.
 | USDC ERC-20 | `0x3600000000000000000000000000000000000000` | Arc docs |
 | Bound amount unit | micro-USDC, 6 decimals | ERC-20 view |
 
+> **RPC hostname — settled 2026-08-20.** `https://rpc.testnet.arc.io` is the
+> live endpoint; it answers `eth_chainId` with `0x4cef52`. Recorded because the
+> published sources disagreed:
+>
 > **RPC hostname is unsettled in public sources.** Circle's own `use-arc` skill
 > publishes `rpc.testnet.arc.network`; `docs.arc.io` publishes
 > `rpc.testnet.arc.io`. The implementation therefore takes the RPC endpoint as
@@ -164,13 +168,28 @@ refuses any gap between them.
 **The fee ceiling is expressed in micro-USDC and converted by a ratio that is
 CHECKED, not assumed.** §A.5.11 forbids converting between the 6- and
 18-decimal views; a ceiling in the operator's own unit is a deliberate, narrow
-exception, and it is only safe because the settlement path verifies the 10¹²
-ratio against the chain at run time — the native and ERC-20 balances of the same
-account are two views of one pool, so they must differ by exactly that factor.
-An unchecked constant would silently multiply the ceiling by a trillion if the
-assumption were wrong, disabling assertion 7 while still printing PASS. That is
-the same treatment the transfer selector gets, for the same reason: a constant
-nobody checks is not a constant, it is a guess.
+exception, and it is only safe because the settlement path verifies the relation
+against the chain on every run. An unchecked constant would silently multiply
+the ceiling by a trillion if the assumption were wrong, disabling assertion 7
+while still printing PASS. Same treatment as the transfer selector, same reason:
+a constant nobody checks is not a constant, it is a guess.
+
+**The relation is truncation, not equality**, and getting that wrong is a
+fail-closed bug rather than a safety property. Gas is metered at native
+(18-decimal) granularity, so the moment an account pays for anything its native
+balance stops being a whole number of micro-USDC, and `balanceOf` reports the
+floor. The invariant is
+
+```
+erc20 == native / 10¹²      equivalently      0 ≤ native − erc20×10¹² < 10¹²
+```
+
+An implementation demanding exact equality passes on a freshly funded wallet and
+then refuses every settlement after the first — which is exactly what happened
+in rehearsal on 2026-08-20, with a residue of 5×10¹⁰ native units left by the
+first transaction's gas. The arithmetic belongs in the guard package where it is
+unit-tested against that observed residue, not in a command where it is only
+exercised by a live chain.
 
 **Gas is bounded, not unbound — because on Arc gas is the payment asset.** The
 Solana profile leaves `extra.feePayer` unbound because the fee payer sponsors a
