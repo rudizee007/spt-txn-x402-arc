@@ -96,6 +96,7 @@ func TestNewBoundPayment_Rejections(t *testing.T) {
 		mutate  func(*Binding)
 		wantErr error
 	}{
+		{"zero chain id", func(b *Binding) { b.ChainID = 0 }, ErrChainIDUnset},
 		{"dirty asset identifier", func(b *Binding) { b.Asset = dirty }, ErrDirtyAccountID},
 		{"dirty payTo identifier", func(b *Binding) { b.PayTo = dirty }, ErrDirtyAccountID},
 		{"dirty payer identifier", func(b *Binding) { b.Payer = dirty }, ErrDirtyAccountID},
@@ -103,21 +104,67 @@ func TestNewBoundPayment_Rejections(t *testing.T) {
 		{"zero payTo", func(b *Binding) { b.PayTo = zeroID }, ErrUnsetAddress},
 		{"unset payer", func(b *Binding) { b.Payer = zeroID }, ErrUnsetAddress},
 		{"nil amount", func(b *Binding) { b.Amount = nil }, ErrAmountRange},
+		{"zero amount", func(b *Binding) { b.Amount = big.NewInt(0) }, ErrAmountRange},
 		{"negative amount", func(b *Binding) { b.Amount = big.NewInt(-1) }, ErrAmountRange},
 		{"amount past u128", func(b *Binding) {
 			b.Amount = new(big.Int).Lsh(big.NewInt(1), boundAmountBits)
 		}, ErrAmountRange},
 		{"nil gas ceiling", func(b *Binding) { b.MaxGasCost = nil }, ErrGasCostRange},
+		{"zero gas ceiling", func(b *Binding) { b.MaxGasCost = big.NewInt(0) }, ErrGasCostRange},
 		{"negative gas ceiling", func(b *Binding) { b.MaxGasCost = big.NewInt(-1) }, ErrGasCostRange},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			bind := good
 			c.mutate(&bind)
-			if _, err := NewBoundPayment(bind); !errors.Is(err, c.wantErr) {
+			bp, err := NewBoundPayment(bind)
+			if !errors.Is(err, c.wantErr) {
 				t.Fatalf("got %v, want %v", err, c.wantErr)
 			}
+			// A refusal must hand back nothing usable: the zero BoundPayment
+			// is rejected by Verify (ErrNotBound), so a caller that ignores
+			// the error still cannot sign.
+			if bp != (BoundPayment{}) {
+				t.Fatalf("refused binding returned a non-zero BoundPayment: %+v", bp)
+			}
 		})
+	}
+}
+
+// The smallest positive amount and ceiling are accepted: the zero refusals
+// above are exact, not an off-by-one that also excludes 1.
+func TestNewBoundPayment_AcceptsSmallestPositive(t *testing.T) {
+	_, err := NewBoundPayment(Binding{
+		ChainID: ArcTestnetChainID, Asset: boundAsset.AccountID32(),
+		PayTo: boundPayTo.AccountID32(), Payer: boundPayer.AccountID32(),
+		Amount: big.NewInt(1), Nonce: boundNonce, MaxGasCost: big.NewInt(1),
+	})
+	if err != nil {
+		t.Fatalf("Amount=1, MaxGasCost=1: got %v, want nil", err)
+	}
+}
+
+// The constructor keeps no reference to the caller's big.Ints. After it
+// returns, nothing the caller does to what it passed in can move the bound
+// payment — the complement of TestBoundPayment_AccessorsReturnCopies.
+func TestNewBoundPayment_DetachesFromCallerMemory(t *testing.T) {
+	amount := big.NewInt(boundMicroUSDC)
+	ceiling := new(big.Int).Set(testMaxGasCost)
+	bp, err := NewBoundPayment(Binding{
+		ChainID: ArcTestnetChainID, Asset: boundAsset.AccountID32(),
+		PayTo: boundPayTo.AccountID32(), Payer: boundPayer.AccountID32(),
+		Amount: amount, Nonce: boundNonce, MaxGasCost: ceiling,
+	})
+	if err != nil {
+		t.Fatalf("NewBoundPayment: %v", err)
+	}
+	amount.SetInt64(-1)
+	ceiling.SetInt64(0)
+	if got := bp.Amount(); got.Int64() != boundMicroUSDC {
+		t.Fatalf("caller mutation moved the bound amount to %s", got)
+	}
+	if got := bp.MaxGasCost(); got.Cmp(testMaxGasCost) != 0 {
+		t.Fatalf("caller mutation moved the bound gas ceiling to %s", got)
 	}
 }
 
@@ -249,22 +296,26 @@ func TestVerify_GasCeilingIsInclusive(t *testing.T) {
 	}
 }
 
-func TestVerify_ZeroAmountIsBoundLikeAnyOther(t *testing.T) {
-	tx, _ := validPair(t)
-	b, err := NewBoundPayment(Binding{
+// A zero amount is refused at the binding, so a zero-amount transfer can
+// never be the bound transfer: there is no BoundPayment for it to match. This
+// replaces the earlier TestVerify_ZeroAmountIsBoundLikeAnyOther, which blessed
+// a binding that authorizes nothing and settles only by spending the
+// one-transaction authorization (the Base guard refuses the same shape as
+// "burns the nonce").
+func TestVerify_ZeroAmountHasNoBinding(t *testing.T) {
+	tx, b := validPair(t)
+	_, err := NewBoundPayment(Binding{
 		ChainID: ArcTestnetChainID, Asset: boundAsset.AccountID32(),
 		PayTo: boundPayTo.AccountID32(), Payer: boundPayer.AccountID32(),
 		Amount: big.NewInt(0), Nonce: boundNonce, MaxGasCost: new(big.Int).Set(testMaxGasCost),
 	})
-	if err != nil {
-		t.Fatalf("NewBoundPayment: %v", err)
+	if !errors.Is(err, ErrAmountRange) {
+		t.Fatalf("zero-amount binding: got %v, want ErrAmountRange", err)
 	}
-	if _, err := Verify(tx, b); !errors.Is(err, ErrAmountMismatch) {
-		t.Fatalf("got %v, want ErrAmountMismatch", err)
-	}
+	// And against a real binding, a zero-amount transfer is a mismatch.
 	tx.Data, _ = EncodeTransfer(boundPayTo, big.NewInt(0))
-	if _, err := Verify(tx, b); err != nil {
-		t.Fatalf("zero-amount bound transfer: got %v, want nil", err)
+	if _, err := Verify(tx, b); !errors.Is(err, ErrAmountMismatch) {
+		t.Fatalf("zero-amount transfer against a positive binding: got %v, want ErrAmountMismatch", err)
 	}
 }
 

@@ -111,12 +111,35 @@ var (
 	// ErrNotBound reports a BoundPayment that did not come from NewBoundPayment.
 	ErrNotBound = errors.New("settle/evm: bound payment was not constructed by NewBoundPayment")
 
-	// ErrAmountRange reports a bound amount that is nil, negative, or wider
-	// than the binding's u128.
-	ErrAmountRange = errors.New("settle/evm: bound amount is nil, negative, or exceeds u128")
+	// ErrChainIDUnset reports a bound chain id of zero, which is the shape of
+	// a Binding whose ChainID field was never filled in. No EIP-155 network
+	// this profile settles on has chain id 0, and Verify's chain assertion
+	// against an unset binding would be a 0 == 0 no-op for any transaction
+	// whose builder also forgot to set it.
+	ErrChainIDUnset = errors.New("settle/evm: bound chain id is zero (unset)")
 
-	// ErrGasCostRange reports a nil or negative fee ceiling.
-	ErrGasCostRange = errors.New("settle/evm: bound gas-cost ceiling is nil or negative")
+	// ErrAmountRange reports a bound amount that is nil, non-positive, or
+	// wider than the binding's u128.
+	//
+	// Zero is refused here and not only at the transfer: a capability that
+	// authorizes zero authorizes nothing, and the only effect of settling it
+	// is to spend the one-transaction authorization and the nonce on a
+	// transfer that moves no funds.
+	ErrAmountRange = errors.New("settle/evm: bound amount is nil, non-positive, or exceeds u128")
+
+	// ErrGasCostRange reports a nil or non-positive fee ceiling.
+	//
+	// MaxGasCost is a CAP on gasLimit × maxFeePerGas, so zero does not mean
+	// "no gas bound" — but it is still refused, for two reasons. First, zero
+	// is the shape of a ceiling nobody chose (a *big.Int that was set but
+	// never populated), and on Arc the fee is a second payment out of the same
+	// USDC the transfer spends, so a ceiling nobody chose is not a bound on
+	// that payment. Second, a ceiling of zero admits only a transaction with
+	// gasLimit == 0 or maxFeePerGas == 0, which no EIP-1559 chain with a
+	// non-zero base fee will include: the guard would certify a payment that
+	// can never settle while the one-transaction authorization is consumed by
+	// the signature. Fail closed.
+	ErrGasCostRange = errors.New("settle/evm: bound gas-cost ceiling is nil or non-positive")
 
 	// §A.4 assertions, one sentinel each so an operator can tell which control
 	// fired — and so a DENY_VIOLATION record can say why (SPEC-X402 §5).
@@ -143,12 +166,28 @@ var (
 )
 
 // NewBoundPayment validates a Binding and narrows its 32-byte identifiers to
-// EVM addresses. Every rejection is a DENY_VIOLATION: an identifier with dirty
-// high bytes, the zero address in any account position, an amount outside the
-// binding's u128, or a missing fee ceiling.
+// EVM addresses. Every rejection is a DENY_VIOLATION: an unset chain id, an
+// identifier with dirty high bytes, the zero address in any account position,
+// an amount that is non-positive or outside the binding's u128, or a missing
+// or non-positive fee ceiling.
+//
+// The two *big.Int fields are snapshotted before anything else happens.
+// Amount and MaxGasCost point into memory the caller still owns, and big.Int
+// is mutable: validating b.Amount and then re-reading the same pointer at
+// construction would check one value and store another. Every check and the
+// stored value use the private copies; the caller's pointers are dropped from
+// the local Binding so nothing below can reach them even by mistake. (See
+// TestNewBoundPayment_UsesItsOwnCopies.)
 func NewBoundPayment(b Binding) (BoundPayment, error) {
 	var out BoundPayment
 
+	amount := cloneBig(b.Amount)
+	maxGasCost := cloneBig(b.MaxGasCost)
+	b.Amount, b.MaxGasCost = nil, nil // caller memory is unreachable from here on
+
+	if b.ChainID == 0 {
+		return out, ErrChainIDUnset
+	}
 	asset, err := AddressFromAccountID(b.Asset)
 	if err != nil {
 		return out, fmt.Errorf("asset: %w", err)
@@ -166,10 +205,10 @@ func NewBoundPayment(b Binding) (BoundPayment, error) {
 			return out, fmt.Errorf("%s: %w", name, ErrUnsetAddress)
 		}
 	}
-	if b.Amount == nil || b.Amount.Sign() < 0 || b.Amount.BitLen() > boundAmountBits {
+	if amount == nil || amount.Sign() <= 0 || amount.BitLen() > boundAmountBits {
 		return out, ErrAmountRange
 	}
-	if b.MaxGasCost == nil || b.MaxGasCost.Sign() < 0 {
+	if maxGasCost == nil || maxGasCost.Sign() <= 0 {
 		return out, ErrGasCostRange
 	}
 	return BoundPayment{
@@ -178,10 +217,19 @@ func NewBoundPayment(b Binding) (BoundPayment, error) {
 		asset:      asset,
 		payTo:      payTo,
 		payer:      payer,
-		amount:     new(big.Int).Set(b.Amount), // defensive copy: the caller cannot move the target after the check
+		amount:     amount, // the validated snapshot IS the stored value
 		nonce:      b.Nonce,
-		maxGasCost: new(big.Int).Set(b.MaxGasCost),
+		maxGasCost: maxGasCost,
 	}, nil
+}
+
+// cloneBig returns a private copy of x that shares no memory with it, or nil
+// for nil so a missing field stays missing rather than becoming zero.
+func cloneBig(x *big.Int) *big.Int {
+	if x == nil {
+		return nil
+	}
+	return new(big.Int).Set(x)
 }
 
 // Accessors for display and for building the transaction. Each returns a copy,
