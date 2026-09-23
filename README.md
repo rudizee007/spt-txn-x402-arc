@@ -75,6 +75,10 @@ every control fired as specified; 13 modes refused, nothing broadcast
 
 Then settle for real on Arc testnet — see [`docs/RUNBOOK-ARC.md`](docs/RUNBOOK-ARC.md).
 
+**Arc mainnet** moves real USDC and is never a default. It is reached only with
+`-network mainnet`, and then `payarc` also requires an explicit `-amount` and a
+`-key` file that is not the testnet default path (runbook §M).
+
 ## Layout
 
 | Path | Build | What it is |
@@ -119,8 +123,8 @@ has no dependency and is unaffected.
 
 ## Status — read this before citing it
 
-Nothing here is externally audited. Nothing is in production. This is testnet
-work built to a written spec, adversarially reviewed twice in fresh context, and
+Nothing here is externally audited. Nothing is in production. It runs on Arc
+testnet by default and on Arc mainnet only when named. It was built to a written spec, adversarially reviewed twice in fresh context, and
 it should be treated as exactly that.
 
 The bound payment in `cmd/payarc` is declared on the command line, **not**

@@ -36,13 +36,93 @@ const (
 
 	// ArcTestnetNetworkTag is this deployment's u8 allowlist tag for
 	// ArcTestnetCAIP2. Tags are deployment configuration and are permanent once
-	// assigned, because they are hashed into every binding (SPEC-X402 §4).
+	// assigned, because the gate hashes them into its binding (SPEC-X402 §4).
+	// Nothing in this repository puts a tag in a preimage; the settle guard binds
+	// the chain id.
 	// 1 and 2 are already spent on solana:devnet in this tree.
 	ArcTestnetNetworkTag byte = 3
 )
 
 // USDCArcTestnet is the USDC ERC-20 interface on Arc testnet.
 var USDCArcTestnet = MustParseAddress("0x3600000000000000000000000000000000000000")
+
+// Arc mainnet network profile (docs/SPEC-X402-ARC.md §A.1, mainnet table).
+// The same rules apply as for testnet: public documentation, never adopted
+// from an RPC response.
+const (
+	// ArcMainnetChainID is the EIP-155 chain id of Arc mainnet.
+	ArcMainnetChainID uint64 = 5042
+
+	// ArcMainnetCAIP2 is the CAIP-2 network identifier for Arc mainnet.
+	ArcMainnetCAIP2 = "eip155:5042"
+
+	// ArcMainnetExplorerTxPrefix renders a settled mainnet transaction.
+	ArcMainnetExplorerTxPrefix = "https://explorer.arc.io/tx/"
+
+	// ArcMainnetNetworkTag is this deployment's u8 allowlist tag for
+	// ArcMainnetCAIP2. Permanent once assigned, like every tag. As with the
+	// testnet tag, nothing in this repository hashes it; the chain id is what the
+	// settle guard binds.
+	ArcMainnetNetworkTag byte = 4
+)
+
+// USDCArcMainnet is the USDC ERC-20 interface on Arc mainnet. It is the same
+// address as on testnet, so the chain id is the only field that tells the two
+// networks apart.
+var USDCArcMainnet = MustParseAddress("0x3600000000000000000000000000000000000000")
+
+// ArcNetwork is one complete Arc network profile. Every network-dependent
+// value a settlement uses comes from one of these, so the binding, the signer
+// and the endpoint check cannot be drawn from different networks.
+type ArcNetwork struct {
+	Name             string
+	ChainID          uint64
+	CAIP2            string
+	USDC             Address
+	ExplorerTxPrefix string
+	NetworkTag       byte
+}
+
+// ArcTestnet returns the Arc testnet profile.
+func ArcTestnet() ArcNetwork {
+	return ArcNetwork{
+		Name:             "testnet",
+		ChainID:          ArcTestnetChainID,
+		CAIP2:            ArcTestnetCAIP2,
+		USDC:             USDCArcTestnet,
+		ExplorerTxPrefix: ArcTestnetExplorerTxPrefix,
+		NetworkTag:       ArcTestnetNetworkTag,
+	}
+}
+
+// ArcMainnet returns the Arc mainnet profile.
+func ArcMainnet() ArcNetwork {
+	return ArcNetwork{
+		Name:             "mainnet",
+		ChainID:          ArcMainnetChainID,
+		CAIP2:            ArcMainnetCAIP2,
+		USDC:             USDCArcMainnet,
+		ExplorerTxPrefix: ArcMainnetExplorerTxPrefix,
+		NetworkTag:       ArcMainnetNetworkTag,
+	}
+}
+
+// ErrUnknownNetwork reports a network name that is not exactly "testnet" or
+// "mainnet".
+var ErrUnknownNetwork = errors.New("settle/evm: unknown Arc network")
+
+// ArcNetworkByName returns the profile named exactly "testnet" or "mainnet".
+// Anything else, including the empty string and other capitalisations, is
+// refused rather than mapped to a default.
+func ArcNetworkByName(name string) (ArcNetwork, error) {
+	switch name {
+	case "testnet":
+		return ArcTestnet(), nil
+	case "mainnet":
+		return ArcMainnet(), nil
+	}
+	return ArcNetwork{}, fmt.Errorf("%w: %q (want \"testnet\" or \"mainnet\")", ErrUnknownNetwork, name)
+}
 
 // NativeScale is the ratio between USDC's native view (18 decimals) and its
 // ERC-20 view (6 decimals) on Arc: 10^12 native units per micro-USDC. Returned

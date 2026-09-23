@@ -81,6 +81,12 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go run -tags arc ./cmd/payarc -selftest
+      # The network wiring: binding, signer, plan and endpoint check must all
+      # name the selected network, and mainnet takes no defaults.
+      - name: settlement command tests
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags arc ./cmd/payarc/ -count=1
 
   fuzz:
     name: fuzz the guard

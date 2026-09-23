@@ -28,7 +28,7 @@ import (
 // that the post-sign leg — build, sign with go-ethereum, recover the sender,
 // re-check — behaves as specified. That last part is the piece a unit test on
 // the guard package cannot see.
-func runSelfTest() int {
+func runSelfTest(net evm.ArcNetwork) int {
 	const (
 		amount   = 1_000_000 // 1.00 USDC
 		nonce    = 7
@@ -46,30 +46,20 @@ func runSelfTest() int {
 	}
 	payer := crypto.PubkeyToAddress(payerKey.PublicKey)
 	merchant := common.Address(evm.MustParseAddress("0x2222222222222222222222222222222222222222"))
-	asset := common.Address(evm.USDCArcTestnet)
+	asset := common.Address(net.USDC)
 
-	bound, err := evm.NewBoundPayment(evm.Binding{
-		ChainID:    evm.ArcTestnetChainID,
-		Asset:      evm.Address(asset).AccountID32(),
-		PayTo:      evm.Address(merchant).AccountID32(),
-		Payer:      evm.Address(payer).AccountID32(),
-		Amount:     big.NewInt(amount),
-		Nonce:      nonce,
-		MaxGasCost: maxGasCost,
-	})
+	bound, err := newBinding(net, merchant, payer, big.NewInt(amount), nonce, maxGasCost)
 	if err != nil {
 		fmt.Printf("FAIL  binding: %v\n", err)
 		return 1
 	}
-	signer := types.LatestSignerForChainID(new(big.Int).SetUint64(evm.ArcTestnetChainID))
+	signer := newSigner(net)
 
-	base := plan{
-		asset: asset, merchant: merchant, payer: payer,
-		amount: big.NewInt(amount), nonce: nonce,
-		gasLimit: gasLimit, feeCap: feeCap, tip: big.NewInt(1),
-	}
+	base := newPlan(net, merchant, payer, big.NewInt(amount), nonce, feeCap, big.NewInt(1))
+	base.gasLimit = gasLimit
 
 	fmt.Println("selftest — SPEC-X402-ARC §A.4, offline, ephemeral key, nothing broadcast")
+	fmt.Printf("  network   %s %s (chain id %d)\n", net.Name, net.CAIP2, net.ChainID)
 	fmt.Printf("  payer     %s  (ephemeral)\n", payer)
 	fmt.Printf("  merchant  %s\n", merchant)
 	fmt.Printf("  asset     %s\n", asset)

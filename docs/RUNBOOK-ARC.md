@@ -231,3 +231,28 @@ discarded). Nothing is broadcast. Nothing moves.
   Tags are per-deployment configuration so nothing is broken, but two values for
   one network in one deployment is the confusable state §4 sets out to remove.
   Out of scope here; worth fixing there.
+
+---
+
+## M. Arc mainnet — real USDC
+
+Mainnet is never a default. Everything above is testnet.
+
+1. **Use a key used only for mainnet.** Do not reuse `~/.config/spt-txn/arc.key`,
+   which the testnet steps create; `payarc` refuses that path on mainnet.
+   ```bash
+   umask 077 && openssl rand -hex 32 > ~/.config/spt-txn/arc-mainnet.key
+   ```
+2. **Fund it with a little USDC on Arc mainnet.** There is no faucet. About $1 covers
+   a 0.01 USDC transfer many times over; on 2026-09-23 gas was ~20 gwei, which is
+   roughly 0.0013 USDC per transfer.
+3. **Dry run first** (asserts, never signs):
+   ```bash
+   CGO_ENABLED=0 go run -tags arc ./cmd/payarc -network mainnet \
+     -rpc https://rpc.mainnet.arc.io -key ~/.config/spt-txn/arc-mainnet.key \
+     -to 0x<second address you control> -amount 10000 -dry-run
+   ```
+4. **Settle:** the same command without `-dry-run`. Record the transaction hash
+   and block at once (spt-poc STATUS.md sets the rule: record the hash at deploy
+   time).
+5. Remove or move the key file off the machine when finished.

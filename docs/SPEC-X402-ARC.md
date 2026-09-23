@@ -17,7 +17,8 @@ today speaks SPL `TransferChecked`, gains an EVM sibling defined in §A.4.
 
 ## A.0 Scope and non-goals
 
-**In scope.** Authorizing and settling a USDC payment on Arc testnet through the
+**In scope.** Authorizing and settling a USDC payment on Arc (testnet by default;
+mainnet only when named, §A.1) through the
 existing gate, with a pre-sign guard that refuses to sign anything other than
 exactly the payment that was authorized.
 
@@ -60,9 +61,44 @@ unpublished material, in code, comments, commit messages, or tests.
 > configuration with no silent default fallback, and reports which endpoint it
 > used. Confirm the live one before recording anything.
 
+**Arc mainnet profile — added 2026-09-23.** The same profile applies to Arc
+mainnet with these values. Every one was read from Circle's Arc documentation
+(docs.arc.io: "Connect to Arc" and "Contract addresses") and confirmed against
+the live endpoint on 2026-09-23. `eth_chainId` returned `0x13b2`, and the USDC
+contract returned `decimals() = 6` and `symbol() = "USDC"`. That check is a
+record of what the endpoint returned on that date, not something this
+repository re-runs. The one check the command does re-run is the chain id, on
+every settlement. The explorer's `/tx/` path follows the documented explorer
+host; it has not yet been checked against a settled mainnet transaction.
+
+| Item | Value | Source |
+|---|---|---|
+| CAIP-2 network id | `eip155:5042` | chain id below |
+| Chain id | `5042` | Arc docs; live `eth_chainId` |
+| RPC (HTTP) | `https://rpc.mainnet.arc.io` | Arc docs |
+| Explorer | `https://explorer.arc.io` | Arc docs |
+| USDC ERC-20 | `0x3600000000000000000000000000000000000000` | Arc docs; same address as testnet |
+| Allowlist tag | `4` | this profile (see below) |
+
+**Selecting the network: mainnet is never a default.** There are exactly two
+names, `testnet` and `mainnet`. Testnet is the default, so existing commands
+keep working. Mainnet moves real USDC and is reached only by naming it. Any
+other value is refused; it is never mapped to either network. Five values come from the one profile selected: the chain id in the binding,
+the chain id of the signer, the chain id the endpoint must report, the USDC
+address and the explorer link. They are built in one place
+(`cmd/payarc/network.go`) and tested together for both networks. Some values
+are **not** network-dependent and are shared: the default fee ceiling, and the
+key path, which mainnet refuses. On mainnet `payarc` also requires `-amount`
+and a `-key` other than the testnet default path, so a faucet key used for
+demos cannot spend real funds by adding one flag. The testnet USDC address and the mainnet USDC address are
+identical, so the **chain id is the only field that separates the two
+networks**. The binding (§A.4 assertion 3), the signer's preimage and the
+endpoint check therefore all have to come from the same selected value. None
+of them may fall back to the testnet constant.
+
 **Allowlist tag.** §4 requires `network` to be an allowlisted `u8` enum, not a
 hashed string, and tags to be permanent once assigned. This profile uses
-`eip155:5042002 → 3`. *(Note for the maintainer: the Solana repository is
+`eip155:5042002 → 3` and `eip155:5042 → 4`. *(Note for the maintainer: the Solana repository is
 already inconsistent — `cmd/escrowdevnet` and `escrow/link_test.go` assign
 `solana:devnet → 1` while `cmd/gateway`, `cmd/mcp-*` and `demo` assign it `2`.
 Tags are per-deployment configuration so nothing is presently broken, but two

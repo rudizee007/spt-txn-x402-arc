@@ -1,6 +1,6 @@
 //go:build arc
 
-// Command payarc performs a REAL USDC transfer on Arc testnet, gated by the
+// Command payarc performs a REAL USDC transfer on Arc, gated by the
 // SPT-Txn EVM settle guard (docs/SPEC-X402-ARC.md §A.4). It builds the
 // transaction, reads every field back off the object that is about to be
 // signed, asserts it moves exactly the bound amount of the bound asset to the
@@ -31,6 +31,9 @@
 //	CGO_ENABLED=0 go run -tags arc ./cmd/payarc -rpc ... -to 0x… -amount 100000
 //	CGO_ENABLED=0 go run -tags arc ./cmd/payarc -rpc ... -tamper value   # guard refuses to sign
 //	CGO_ENABLED=0 go run -tags arc ./cmd/payarc -tamper list             # every adversarial mode
+//	# Arc MAINNET moves real USDC and is never a default; it must be named:
+//	CGO_ENABLED=0 go run -tags arc ./cmd/payarc -network mainnet -rpc https://rpc.mainnet.arc.io \
+//	    -key ~/.config/spt-txn/arc-mainnet.key -amount 10000     # see docs/RUNBOOK-ARC.md §M
 //
 // Nothing here is externally audited and nothing is in production.
 package main
@@ -97,7 +100,8 @@ func defaultKeyPath() (string, error) {
 func main() {
 	defaultKey, keyPathErr := defaultKeyPath()
 
-	rpcURL := flag.String("rpc", "", "Arc testnet JSON-RPC endpoint (REQUIRED; public sources disagree — see SPEC-X402-ARC §A.1)")
+	networkName := flag.String("network", "testnet", "Arc network: exactly \"testnet\" or \"mainnet\". Mainnet moves real USDC and is never a default")
+	rpcURL := flag.String("rpc", "", "Arc JSON-RPC endpoint for the selected -network (REQUIRED; see SPEC-X402-ARC §A.1)")
 	keyPath := flag.String("key", defaultKey, "path to a file containing the payer's secp256k1 key as 64 hex characters")
 	toStr := flag.String("to", "", "merchant address (0x…); default: pay yourself")
 	boundPayTo := flag.String("bound-payto", "", "the payTo identifier as the gate carries it (base58 of the 32-byte account id); when set, it must denote -to")
@@ -112,15 +116,25 @@ func main() {
 		printTamperModes()
 		return
 	}
+	// Every network-dependent value below comes from this one profile, through
+	// the constructors in network.go (SPEC-X402-ARC §A.1).
+	net, err := evm.ArcNetworkByName(*networkName)
+	if err != nil {
+		fatal("DENY_VIOLATION", err)
+	}
 	if *selfTest {
-		os.Exit(runSelfTest())
+		os.Exit(runSelfTest(net))
+	}
+	set := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if err := checkMainnetFlags(net, set, *keyPath, defaultKey); err != nil {
+		fatal("DENY_VIOLATION", err)
 	}
 	if *rpcURL == "" {
 		fatal("DENY_UNAVAILABLE", fmt.Errorf("-rpc is required and has no default.\n"+
-			"  Arc's own docs publish   https://rpc.testnet.arc.io\n"+
-			"  Circle's use-arc skill publishes  https://rpc.testnet.arc.network\n"+
-			"  They disagree. Confirm the live one and pass it explicitly rather than\n"+
-			"  letting a settlement path silently choose a network endpoint for you"))
+			"  %s.\n"+
+			"  Pass it explicitly rather than letting a settlement path silently\n"+
+			"  choose a network endpoint for you", rpcHint(net)))
 	}
 	if *keyPath == "" {
 		fatal("DENY_UNAVAILABLE", keyPathErr)
@@ -162,9 +176,12 @@ func main() {
 		merchant = common.Address(a)
 	}
 
-	asset := common.Address(evm.USDCArcTestnet)
+	asset := common.Address(net.USDC)
 
-	fmt.Printf("network:   %s (chain id %d)\n", evm.ArcTestnetCAIP2, evm.ArcTestnetChainID)
+	if net.Name == "mainnet" {
+		fmt.Println("*** ARC MAINNET: this moves real USDC ***")
+	}
+	fmt.Printf("network:   %s %s (chain id %d)\n", net.Name, net.CAIP2, net.ChainID)
 	fmt.Printf("rpc:       %s\n", *rpcURL)
 	fmt.Printf("payer:     %s\n", payer)
 	fmt.Printf("merchant:  %s\n", merchant)
@@ -201,8 +218,8 @@ func main() {
 	}
 	// §A.5.12: the bound chain id is configuration. A disagreeing endpoint is
 	// refused, never adopted.
-	if !reported.IsUint64() || reported.Uint64() != evm.ArcTestnetChainID {
-		fatal("DENY_VIOLATION", fmt.Errorf("endpoint reports chain id %s, this profile is bound to %d — refusing to settle on an unexpected network", reported, evm.ArcTestnetChainID))
+	if err := checkEndpointChain(net, reported); err != nil {
+		fatal("DENY_VIOLATION", err)
 	}
 
 	// ── 4. Preflight: does the payer hold the USDC, and is the fee ceiling
@@ -213,7 +230,11 @@ func main() {
 	}
 	fmt.Printf("balance:   %s micro-USDC (%s USDC)\n", bal, usdc(bal))
 	if bal.Cmp(new(big.Int).SetUint64(*amount)) < 0 || bal.Sign() == 0 {
-		fatal("DENY_UNAVAILABLE", fmt.Errorf("insufficient USDC: have %s, need %d micro-USDC\n  -> top up %s at %s (select Arc testnet)", bal, *amount, payer, evm.USDCFaucet))
+		hint := fmt.Sprintf("top up %s at %s (select Arc testnet)", payer, evm.USDCFaucet)
+		if net.Name != "testnet" {
+			hint = fmt.Sprintf("fund %s with USDC on Arc %s; there is no faucet", payer, net.Name)
+		}
+		fatal("DENY_UNAVAILABLE", fmt.Errorf("insufficient USDC: have %s, need %d micro-USDC\n  -> %s", bal, *amount, hint))
 	}
 	if err := assertNativeRatio(ctx, client, payer, bal); err != nil {
 		fatal("DENY_VIOLATION", err)
@@ -238,11 +259,7 @@ func main() {
 	feeCap := new(big.Int).Add(new(big.Int).Mul(head.BaseFee, big.NewInt(2)), tip)
 	maxGasCost := new(big.Int).Mul(new(big.Int).SetUint64(*maxFee), evm.NativeScale())
 
-	p := plan{
-		asset: asset, merchant: merchant, payer: payer,
-		amount: new(big.Int).SetUint64(*amount), nonce: nonce,
-		feeCap: feeCap, tip: tip,
-	}
+	p := newPlan(net, merchant, payer, new(big.Int).SetUint64(*amount), nonce, feeCap, tip)
 	if mode.apply != nil {
 		fmt.Printf("\n[tamper %s] %s\n", *tamper, mode.description)
 		mode.apply(&p)
@@ -270,15 +287,7 @@ func main() {
 	fmt.Printf("fee cap:   %s per gas (base %s + tip %s)\n", feeCap, head.BaseFee, tip)
 	fmt.Printf("worst-case fee: %s of %s native units\n", new(big.Int).Mul(new(big.Int).SetUint64(gasLimit), feeCap), maxGasCost)
 
-	bound, err := evm.NewBoundPayment(evm.Binding{
-		ChainID:    evm.ArcTestnetChainID,
-		Asset:      evm.Address(asset).AccountID32(),
-		PayTo:      evm.Address(merchant).AccountID32(),
-		Payer:      evm.Address(payer).AccountID32(),
-		Amount:     new(big.Int).SetUint64(*amount),
-		Nonce:      nonce,
-		MaxGasCost: maxGasCost,
-	})
+	bound, err := newBinding(net, merchant, payer, new(big.Int).SetUint64(*amount), nonce, maxGasCost)
 	if err != nil {
 		fatal("DENY_VIOLATION", fmt.Errorf("binding: %w", err))
 	}
@@ -290,7 +299,7 @@ func main() {
 	// guard asserts is not by itself the field that enters the signature.
 	// Constructing the signer before the guard runs, and pinning its chain id
 	// to the same constant, means assertion 3 and the preimage cannot drift.
-	signer := types.LatestSignerForChainID(new(big.Int).SetUint64(evm.ArcTestnetChainID))
+	signer := newSigner(net)
 	if sc := signer.ChainID(); !sc.IsUint64() || sc.Uint64() != bound.ChainID() {
 		fatal("DENY_VIOLATION", fmt.Errorf("signer chain id %s != bound chain id %d", sc, bound.ChainID()))
 	}
@@ -348,7 +357,7 @@ func main() {
 	if err := client.SendTransaction(ctx, signed); err != nil {
 		fatal("DENY_UNAVAILABLE", fmt.Errorf("broadcast: %w", err))
 	}
-	fmt.Printf("\nsent:      %s%s\n", evm.ArcTestnetExplorerTxPrefix, signed.Hash().Hex())
+	fmt.Printf("\nsent:      %s%s\n", net.ExplorerTxPrefix, signed.Hash().Hex())
 
 	waitCtx, waitCancel := context.WithTimeout(ctx, confirmTimeout)
 	defer waitCancel()
@@ -364,7 +373,8 @@ func main() {
 	fmt.Printf("  payer:    %s\n", payer)
 	fmt.Printf("  merchant: %s\n", merchant)
 	fmt.Printf("  block:    %d, gas used %d\n", receipt.BlockNumber, receipt.GasUsed)
-	fmt.Printf("  tx:       %s%s\n", evm.ArcTestnetExplorerTxPrefix, signed.Hash().Hex())
+	fmt.Printf("  network:  %s (chain id %d)\n", net.CAIP2, net.ChainID)
+	fmt.Printf("  tx:       %s%s\n", net.ExplorerTxPrefix, signed.Hash().Hex())
 }
 
 // ── preflight assertions ────────────────────────────────────────────────────
@@ -444,6 +454,10 @@ type plan struct {
 	feeCap   *big.Int
 	tip      *big.Int
 
+	// chainBase is the selected network's chain id. It has no default: a plan
+	// built without one carries chain id 0, which the guard refuses.
+	chainBase uint64
+
 	// tamper knobs
 	legacy      bool
 	chainID     *big.Int
@@ -458,7 +472,7 @@ func (p plan) chain() *big.Int {
 	if p.chainID != nil {
 		return p.chainID
 	}
-	return new(big.Int).SetUint64(evm.ArcTestnetChainID)
+	return new(big.Int).SetUint64(p.chainBase)
 }
 
 func (p plan) value() *big.Int {
