@@ -256,3 +256,9 @@ Mainnet is never a default. Everything above is testnet.
    and block at once (spt-poc STATUS.md sets the rule: record the hash at deploy
    time).
 5. Remove or move the key file off the machine when finished.
+
+**First mainnet settlement (recorded 2026-09-25):** tx
+`0x88a8497510d02335d00b932fc9d1c4205fe06fb7e35e4cbfb9924bc1ceadf3cf`, block 22754544,
+0.01 USDC from `0x4788…a628` to `0x79A3…971d`, fee 0.0014861538 USDC. Dry run first
+(`guard: PASS`), then settle (`guard: PASS`, `post-sign: PASS`, `SETTLED`). Details in the
+README.

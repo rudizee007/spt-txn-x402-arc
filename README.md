@@ -79,6 +79,25 @@ Then settle for real on Arc testnet — see [`docs/RUNBOOK-ARC.md`](docs/RUNBOOK
 `-network mainnet`, and then `payarc` also requires an explicit `-amount` and a
 `-key` file that is not the testnet default path (runbook §M).
 
+### On Arc mainnet
+
+The first guarded USDC transfer on Arc mainnet, recorded at the time it settled:
+
+| What | Value |
+|---|---|
+| Transaction | [`0x88a8497510d02335d00b932fc9d1c4205fe06fb7e35e4cbfb9924bc1ceadf3cf`](https://explorer.arc.io/tx/0x88a8497510d02335d00b932fc9d1c4205fe06fb7e35e4cbfb9924bc1ceadf3cf) |
+| Block / time | 22754544 · 2026-09-25 21:53:29 UTC |
+| Network | Arc mainnet, chain id 5042 |
+| Payer → recipient | `0x4788Ca19912c9d6c08b44698acF8F00C48bAa628` → `0x79A34Cc563f848f626038Ff312CCEBfb5374971d` |
+| Amount | 10000 micro-USDC (0.01 USDC) |
+| Fee | 0.0014861538 USDC (gas used 73938), under the 0.05 USDC ceiling |
+| Code | `main` at `4f83afc` |
+
+Decoding it on chain shows what was signed rather than what our tooling reports:
+`to` is the USDC contract `0x3600…0000` (not a router), `value` is 0, the calldata
+is exactly 68 bytes with selector `a9059cbb`, and it carries the bound recipient
+and amount. The access list is empty and there is no authorization list.
+
 ## Layout
 
 | Path | Build | What it is |
