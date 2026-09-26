@@ -77,8 +77,13 @@ A JSON file written by the human operator, read once at startup:
 | `resource` | resource identifier, bound byte-exact |
 | `max_amount_micro` | ceiling in micro-USDC, a positive integer |
 | `expires_at` | RFC 3339 time; required |
+| `max_payments` | how many ALLOWs the capability may issue; optional, default 1 |
 
-Unknown fields are refused. The asset is always the selected network's USDC; it
+Unknown fields are refused. `max_payments` is enforced inside the enforcement
+point's policy, so a refusal for a used-up capability is a recorded DENY like
+any other. It is a count of authorizations, not a spending budget. It is held in
+memory and resets when the server restarts; the capability's expiry bounds that
+exposure, and the operator issues a fresh capability per session. The asset is always the selected network's USDC; it
 is not configurable. The recipient is carried to the enforcement point in the
 transport form of §A.2 (base58 of the 32-byte widened account id).
 
