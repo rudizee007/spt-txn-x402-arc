@@ -53,10 +53,15 @@ func AssertNativeRatio(ctx context.Context, c *ethclient.Client, payer common.Ad
 }
 
 // BoundNonce reads the nonce to bind, and refuses a gap between the confirmed
-// and pending counts. The nonce is the one bound value that comes off the wire,
-// so assertion 4 otherwise compares an endpoint-chosen value against itself. A
-// hostile or wrong endpoint that returns confirmed+40 gets a valid, signed,
-// unexpired payment it can cause to execute whenever it later fills the gap.
+// and pending counts, which catches an account with unconfirmed transactions
+// and an endpoint that reports the two inconsistently.
+//
+// What it does NOT catch: both numbers come from the same endpoint, so a
+// hostile endpoint that reports confirmed+k for both passes. It then holds a
+// correctly bound signed payment that becomes valid only when the payer's
+// nonce reaches it. Config.NonceCheck (a second, independent endpoint) closes
+// that for a single hostile endpoint; without it, the residual is documented in
+// docs/SPEC-ARC-GATE.md §4.
 func BoundNonce(ctx context.Context, c *ethclient.Client, payer common.Address) (uint64, error) {
 	pending, err := c.PendingNonceAt(ctx, payer)
 	if err != nil {

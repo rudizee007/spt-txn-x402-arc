@@ -27,6 +27,11 @@ import (
 // A checkpoint costs a fraction of a cent at current Arc prices.
 const checkpointMaxFeeMicro = 20_000
 
+// checkpointMinInterval spaces triggered checkpoints, so an agent that floods
+// the server with calls cannot spend the checkpoint key's gas faster than one
+// checkpoint a minute.
+const checkpointMinInterval = time.Minute
+
 // checkpointer publishes the log head on Arc (SPEC-ARC-GATE §5). A checkpoint
 // is evidence publication, not authorization: a failure is reported and
 // retried at the next trigger, and never blocks or changes a decision.
@@ -38,17 +43,19 @@ type checkpointer struct {
 	every     int
 	since     int
 	published int // log size at the last successful checkpoint; -1 before any
+	last      time.Time
+	savedSize func() int // log size at the last successful save
 	diag      io.Writer
 }
 
-func newCheckpointer(net evm.ArcNetwork, c *ethclient.Client, k *ecdsa.PrivateKey, l *translog.Log, every int, diag io.Writer) *checkpointer {
-	return &checkpointer{net: net, client: c, key: k, log: l, every: every, published: -1, diag: diag}
+func newCheckpointer(net evm.ArcNetwork, c *ethclient.Client, k *ecdsa.PrivateKey, l *translog.Log, every int, savedSize func() int, diag io.Writer) *checkpointer {
+	return &checkpointer{net: net, client: c, key: k, log: l, every: every, published: -1, savedSize: savedSize, diag: diag}
 }
 
 // maybePublish is called after every recorded decision.
 func (c *checkpointer) maybePublish() {
 	c.since++
-	if c.since < c.every {
+	if c.since < c.every || time.Since(c.last) < checkpointMinInterval {
 		return
 	}
 	if c.publish(30*time.Second, false) == nil {
@@ -67,6 +74,13 @@ func (c *checkpointer) publish(timeout time.Duration, wait bool) error {
 	if n == 0 || n == c.published {
 		return nil
 	}
+	// Only a head that is on disk is published. Anchoring an unsaved head
+	// would, after a restart, show two roots on chain for one log size.
+	if n != c.savedSize() {
+		err := fmt.Errorf("head of %d entries is not saved (saved: %d)", n, c.savedSize())
+		fmt.Fprintf(c.diag, "checkpoint skipped: %v\n", err)
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	hash, err := c.send(ctx, uint64(n), root, wait)
@@ -75,6 +89,7 @@ func (c *checkpointer) publish(timeout time.Duration, wait bool) error {
 		return err
 	}
 	c.published = n
+	c.last = time.Now()
 	fmt.Fprintf(c.diag, "checkpoint: %d entries, root %x, tx %s%s\n", n, root, c.net.ExplorerTxPrefix, hash.Hex())
 	return nil
 }

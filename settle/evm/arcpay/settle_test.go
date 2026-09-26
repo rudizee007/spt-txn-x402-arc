@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm"
 )
@@ -22,6 +23,7 @@ func goodPayment(net evm.ArcNetwork) Payment {
 		PayToTransport: evm.AccountIDBase58(rcpt),
 		AssetTransport: evm.AccountIDBase58(net.USDC),
 		AmountMicro:    "500000",
+		NotAfter:       time.Now().Add(time.Hour),
 	}
 }
 
@@ -36,6 +38,7 @@ func TestSettle_RefusesBadPaymentsBeforeAnythingElse(t *testing.T) {
 		want error
 	}{
 		{"no authorization", func(p *Payment) { p.Authorization = "" }, ErrNotAuthorized},
+		{"no expiry", func(p *Payment) { p.NotAfter = time.Time{} }, ErrNotAuthorized},
 		{"zero recipient", func(p *Payment) { p.Recipient = evm.Address{} }, ErrZeroRecipient},
 		{"call names another recipient", func(p *Payment) { p.PayToTransport = evm.AccountIDBase58(stranger) }, evm.ErrTransportMismatch},
 		{"approved recipient differs from the call", func(p *Payment) { p.Recipient = stranger }, evm.ErrTransportMismatch},

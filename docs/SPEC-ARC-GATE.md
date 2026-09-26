@@ -46,8 +46,10 @@ the settlement path.
 
 **I2. No ALLOW, no signature.** The server hands a payment to settlement only
 when the enforcement point's result is `Result.Allowed()` (an ALLOW class with a
-log locator), and the settler itself refuses a missing authorization marker.
-Both checks return before a key is read, and each has its own test.
+log locator), and the settler itself refuses a missing authorization marker or
+expiry. Both checks run before the payment key is used for anything, and each
+has its own test. The marker is a correlation handle, not proof of
+authorization: the proof is the enforcement point's decision and its log entry.
 
 **I3. Two independent controls.** The enforcement point decides; the §A.4 guard
 asserts the exact transaction before signing and re-checks it after signing.
@@ -79,11 +81,18 @@ A JSON file written by the human operator, read once at startup:
 | `expires_at` | RFC 3339 time; required |
 | `max_payments` | how many ALLOWs the capability may issue; optional, default 1 |
 
-Unknown fields are refused. `max_payments` is enforced inside the enforcement
-point's policy, so a refusal for a used-up capability is a recorded DENY like
-any other. It is a count of authorizations, not a spending budget. It is held in
-memory and resets when the server restarts; the capability's expiry bounds that
-exposure, and the operator issues a fresh capability per session. The asset is always the selected network's USDC; it
+Every key must be spelled exactly as above and appear once: the file is
+scanned before it is decoded, because the JSON decoder would otherwise accept a
+case-folded duplicate (`"Recipient"`) and let it silently replace the value a
+person reading the file sees. Unknown fields are refused.
+
+`max_payments` is enforced inside the enforcement point's policy, so a refusal
+for a used-up capability is a recorded DENY like any other. It is a count of
+authorizations, not a spending budget. An ALLOW is counted as soon as it is
+issued, before it is persisted, and the count is saved next to the log keyed by
+the SHA-256 of the capability file's exact bytes. A restart, whoever causes it,
+resumes the count for the same capability; a different capability file starts
+a new count. The asset is always the selected network's USDC; it
 is not configurable. The recipient is carried to the enforcement point in the
 transport form of §A.2 (base58 of the 32-byte widened account id).
 
@@ -133,6 +142,19 @@ called. The move carries the existing tests with it, plus a table test shared by
 every caller. The Solana server switches to the shared package in its own later
 change; this spec only requires the Arc server to use it.
 
+**Bounded by the authorization's expiry.** The settler receives the call's
+expiry (`NotAfter`). Every endpoint call before signing runs under that
+deadline, and the expiry is checked again immediately before the signature, so a
+slow or hostile endpoint cannot have a payment signed after its authorization
+lapsed. Confirmation after broadcast is not bounded by it.
+
+**Nonce.** The settler refuses a gap between the endpoint's confirmed and pending
+nonce. Both come from the same endpoint, so a single hostile endpoint can still
+report a future nonce for both and hold a correctly bound signed payment until
+the payer's nonce reaches it. An optional second, independent endpoint
+(`-verify-rpc`) must then agree on the confirmed nonce; running without one
+leaves that residual, and is not recommended on mainnet.
+
 **Lifetime of the signed transaction.** A signed artefact should not outlive the
 authorization that produced it. An EIP-1559 transaction carries no expiry field,
 so on Arc its lifetime cannot be derived from the authorization's expiry. What
@@ -166,10 +188,14 @@ expected 70 bytes, and gas limit times max fee within its own ceiling. It shares
 no code path with the payment guard's binding, so neither can be loosened
 through the other.
 
-**When.** After every N appended decisions (default 10) and on clean shutdown,
-never more than once per head. A failed checkpoint is logged to stderr and
-retried at the next trigger; it never blocks a decision, because a checkpoint is
-evidence publication, not authorization.
+**When.** After every N recorded decisions (default 10), at most once a minute,
+and on shutdown; never twice for the same head, and only for a head that has
+been saved, so a restart cannot leave two roots on chain for one log size. The
+checkpoint runs after the call that triggered it has been answered, so it never
+delays a payment. A failed checkpoint is logged to stderr and retried at the
+next trigger; it never changes a decision, because a checkpoint is evidence
+publication, not authorization. The minimum interval bounds how fast an agent
+flooding the server with calls can spend the checkpoint key's gas.
 
 **Key.** Its own key file, separate from the payment key and from the log
 signing key (three keys, three roles). It holds only enough USDC for gas.
@@ -201,7 +227,8 @@ Each fails when the control it names is reverted:
 5. Expired capability refuses every call; a call's expiry never exceeds the
    capability's (I5).
 6. The checkpoint guard refuses: nonzero value, a different `to`, data off by
-   one byte, a USDC transfer's calldata, and a payment key (I6).
+   one byte, a USDC transfer's calldata, and a fee over its ceiling; startup
+   refuses the payment key in the checkpoint role (I6).
 7. A log save failure prevents settlement (§6).
 8. Startup refuses a missing or malformed capability, unknown fields, a mainnet
    capability without explicit keys, and a checkpoint key equal to the payment

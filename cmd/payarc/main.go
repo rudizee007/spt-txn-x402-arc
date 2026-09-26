@@ -197,6 +197,8 @@ func main() {
 		PayToTransport: transport,
 		AssetTransport: evm.AccountIDBase58(net.USDC),
 		AmountMicro:    strconv.FormatUint(*amount, 10),
+		// The operator is present; the signature must follow within a minute.
+		NotAfter: time.Now().Add(time.Minute),
 	}, demo)
 	if err != nil {
 		fatal(err)

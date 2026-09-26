@@ -21,6 +21,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/subtle"
 	"encoding/hex"
@@ -54,6 +55,7 @@ func main() {
 	cpEvery := flag.Int("checkpoint-every", 10, "publish the log head on Arc after this many new decisions")
 	maxFee := flag.Uint64("max-fee", 50_000, "ceiling on each payment's total fee, micro-USDC")
 	dryRun := flag.Bool("dry-run", false, "run the guard but never sign or broadcast a payment")
+	verifyRPC := flag.String("verify-rpc", "", "optional second, independent endpoint; the payer's nonce must agree on both (recommended on mainnet)")
 	flag.Parse()
 
 	for name, v := range map[string]string{"capability": *capPath, "rpc": *rpcURL, "key": *keyPath,
@@ -66,22 +68,15 @@ func main() {
 		fatal(fmt.Errorf("%w: -checkpoint-every must be at least 1", arcpay.ErrViolation))
 	}
 
-	cap, err := loadCapability(*capPath, time.Now())
+	cap, capDigest, err := loadCapability(*capPath, time.Now())
 	if err != nil {
 		fatal(fmt.Errorf("%w: %w", arcpay.ErrViolation, err))
 	}
-	payKey, err := arcpay.LoadKey(*keyPath)
-	if err != nil {
-		fatal(err)
-	}
-	cpKey, err := arcpay.LoadKey(*cpKeyPath)
+	payKey, cpKey, err := loadKeys(*keyPath, *cpKeyPath)
 	if err != nil {
 		fatal(err)
 	}
 	payAddr, cpAddr := crypto.PubkeyToAddress(payKey.PublicKey), crypto.PubkeyToAddress(cpKey.PublicKey)
-	if err := distinctKeys(payAddr, cpAddr); err != nil {
-		fatal(err)
-	}
 	logKey, err := loadEd25519(*logKeyPath)
 	if err != nil {
 		fatal(err)
@@ -105,7 +100,11 @@ func main() {
 		fatal(fmt.Errorf("%w: %w", arcpay.ErrViolation, err))
 	}
 
-	used := 0
+	countPath := *logPath + ".count"
+	used, err := loadCount(countPath, capDigest)
+	if err != nil {
+		fatal(fmt.Errorf("%w: %w", arcpay.ErrViolation, err))
+	}
 	asset := evm.AccountIDBase58(cap.Net.USDC)
 	enf := &mcpgate.Enforcer{
 		Scheme:  "exact",
@@ -126,6 +125,21 @@ func main() {
 	}
 
 	cfg := arcpay.Config{Net: cap.Net, Client: client, Key: payKey, MaxFeeMicro: *maxFee, Log: os.Stderr}
+	if *verifyRPC != "" {
+		vc, err := ethclient.DialContext(ctx, *verifyRPC)
+		if err != nil {
+			fatal(fmt.Errorf("%w: dial %s: %w", arcpay.ErrUnavailable, *verifyRPC, err))
+		}
+		defer vc.Close()
+		vid, err := vc.ChainID(ctx)
+		if err != nil {
+			fatal(fmt.Errorf("%w: eth_chainId on %s: %w", arcpay.ErrUnavailable, *verifyRPC, err))
+		}
+		if err := arcpay.CheckEndpointChain(cap.Net, vid); err != nil {
+			fatal(fmt.Errorf("%w: -verify-rpc: %w", arcpay.ErrViolation, err))
+		}
+		cfg.NonceCheck = vc
+	}
 	settle := func(ctx context.Context, p arcpay.Payment) (arcpay.Result, error) {
 		return arcpay.SettleWithDemo(ctx, cfg, p, arcpay.Demo{DryRun: *dryRun})
 	}
@@ -133,10 +147,18 @@ func main() {
 		settle = func(ctx context.Context, p arcpay.Payment) (arcpay.Result, error) { return arcpay.Settle(ctx, cfg, p) }
 	}
 
-	cp := newCheckpointer(cap.Net, client, cpKey, log, *cpEvery, os.Stderr)
+	saved := log.Len() // the log was saved by openLog
+	cp := newCheckpointer(cap.Net, client, cpKey, log, *cpEvery, func() int { return saved }, os.Stderr)
+	persist := func() error {
+		if err := log.Save(*logPath); err != nil {
+			return err
+		}
+		saved = log.Len()
+		return saveCount(countPath, capDigest, used)
+	}
 	s := &server{
 		cap: cap, enf: enf, settle: settle,
-		saveLog: func() error { return log.Save(*logPath) },
+		persist: persist,
 		onEntry: cp.maybePublish,
 		now:     time.Now, used: &used,
 		out: os.Stdout, diag: os.Stderr,
@@ -144,15 +166,18 @@ func main() {
 
 	fmt.Fprintln(os.Stderr, "spt-txn arc-gateway ready (stdio).")
 	fmt.Fprintf(os.Stderr, "  network:    %s %s\n", cap.Net.Name, cap.Net.CAIP2)
-	fmt.Fprintf(os.Stderr, "  capability: pay <= %s USDC to %s for %q, at most %d payment(s), until %s\n",
-		arcpay.USDC(new(big.Int).SetUint64(cap.MaxMicro)), cap.Recipient.Hex(), cap.Resource, cap.MaxPayments, cap.ExpiresAt.Format(time.RFC3339))
+	fmt.Fprintf(os.Stderr, "  capability: pay <= %s USDC to %s for %q, at most %d payment(s) (%d used), until %s\n",
+		arcpay.USDC(new(big.Int).SetUint64(cap.MaxMicro)), cap.Recipient.Hex(), cap.Resource, cap.MaxPayments, used, cap.ExpiresAt.Format(time.RFC3339))
 	fmt.Fprintf(os.Stderr, "  payer:      %s\n  checkpoints from %s every %d decisions\n", payAddr, cpAddr, *cpEvery)
 	fmt.Fprintf(os.Stderr, "  log key:    %s (%d entries loaded)\n", hex.EncodeToString(logKey.Public().(ed25519.PublicKey)), log.Len())
 	if *dryRun {
 		fmt.Fprintln(os.Stderr, "  DRY RUN: the guard runs, nothing is signed or sent")
 	}
-	s.serve(ctx, os.Stdin)
-	cp.publishNow() // clean shutdown: one more checkpoint of the final head
+	serr := s.serve(ctx, os.Stdin)
+	cp.publishNow() // one more checkpoint of the last saved head
+	if serr != nil {
+		fatal(fmt.Errorf("%w: input stream ended with an error: %w", arcpay.ErrUnavailable, serr))
+	}
 }
 
 // loadEd25519 reads a log signing key: a 32-byte Ed25519 seed as 64 hex
@@ -204,6 +229,23 @@ func fatal(err error) {
 	}
 	fmt.Fprintf(os.Stderr, "\n%s\n", msg)
 	os.Exit(1)
+}
+
+// loadKeys loads the payment and checkpoint keys and refuses the same key in
+// both roles.
+func loadKeys(payPath, cpPath string) (*ecdsa.PrivateKey, *ecdsa.PrivateKey, error) {
+	pay, err := arcpay.LoadKey(payPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	cp, err := arcpay.LoadKey(cpPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := distinctKeys(crypto.PubkeyToAddress(pay.PublicKey), crypto.PubkeyToAddress(cp.PublicKey)); err != nil {
+		return nil, nil, err
+	}
+	return pay, cp, nil
 }
 
 // distinctKeys refuses a checkpoint key that is the payment key: three roles,

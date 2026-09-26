@@ -42,6 +42,8 @@ var (
 	ErrMissingConfig  = errors.New("arcpay: settlement configuration is incomplete")
 	ErrUnboundedGas   = errors.New("arcpay: endpoint gas estimate exceeds the sanity bound")
 	ErrSignerMismatch = errors.New("arcpay: signer chain id differs from the bound chain id")
+	ErrExpired        = errors.New("arcpay: the authorization expired before the payment was signed")
+	ErrNonceDisagrees = errors.New("arcpay: the nonce-check endpoint disagrees with the settlement endpoint")
 )
 
 const (
@@ -70,6 +72,11 @@ type Payment struct {
 	AssetTransport string
 	// AmountMicro is the authorized amount, micro-USDC, as a base-10 string.
 	AmountMicro string
+	// NotAfter is the authorization's expiry. Everything before signing runs
+	// under this deadline, and it is checked again immediately before the
+	// signature, so a slow or hostile endpoint cannot choose to have the
+	// payment signed after the authorization has lapsed. Zero is refused.
+	NotAfter time.Time
 }
 
 // Config is everything Settle needs that is not part of the payment.
@@ -80,6 +87,11 @@ type Config struct {
 	MaxFeeMicro    uint64        // ceiling on the whole fee, micro-USDC
 	ConfirmTimeout time.Duration // 0 means DefaultConfirmTimeout
 	Log            io.Writer     // progress lines; nil means discard
+	// NonceCheck, if set, is a second, independent endpoint. The confirmed
+	// nonce must agree on both, so one hostile endpoint cannot bind a future
+	// nonce on its own (see BoundNonce).
+	NonceCheck *ethclient.Client
+	Now        func() time.Time // injectable for tests; defaults to time.Now
 }
 
 // Result describes a settled payment.
@@ -135,6 +147,9 @@ func checkPayment(net evm.ArcNetwork, p Payment) (*big.Int, error) {
 	if p.Authorization == "" {
 		return nil, violation(ErrNotAuthorized)
 	}
+	if p.NotAfter.IsZero() {
+		return nil, violation(fmt.Errorf("%w: no expiry on the authorization", ErrNotAuthorized))
+	}
 	if p.Recipient.IsZero() {
 		return nil, violation(ErrZeroRecipient)
 	}
@@ -169,6 +184,19 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 	if confirm <= 0 {
 		confirm = DefaultConfirmTimeout
 	}
+	now := cfg.Now
+	if now == nil {
+		now = time.Now
+	}
+	if !now().Before(p.NotAfter) {
+		return Result{}, violation(ErrExpired)
+	}
+	// Everything up to the signature runs under the authorization's deadline.
+	// Confirmation afterwards uses the caller's context: once broadcast, the
+	// transaction's fate no longer depends on this process.
+	parent := ctx
+	ctx, cancelPre := context.WithDeadline(ctx, p.NotAfter)
+	defer cancelPre()
 
 	// ── 0. Differential check on the one hardcoded constant ────────────────
 	if err := AssertSelector(); err != nil {
@@ -209,6 +237,15 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 	nonce, err := BoundNonce(ctx, cfg.Client, payer)
 	if err != nil {
 		return Result{}, violation(err)
+	}
+	if cfg.NonceCheck != nil {
+		other, err := cfg.NonceCheck.NonceAt(ctx, payer, nil)
+		if err != nil {
+			return Result{}, unavailable(fmt.Errorf("nonce-check endpoint: %w", err))
+		}
+		if other != nonce {
+			return Result{}, violation(fmt.Errorf("%w: %d vs %d", ErrNonceDisagrees, nonce, other))
+		}
 	}
 	tip, err := cfg.Client.SuggestGasTipCap(ctx)
 	if err != nil {
@@ -302,6 +339,9 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 		signKey = d.DecoyKey
 		fmt.Fprintf(out, "[tamper]   signing with an unauthorized key %s\n", crypto.PubkeyToAddress(d.DecoyKey.PublicKey))
 	}
+	if !now().Before(p.NotAfter) {
+		return Result{}, violation(fmt.Errorf("%w; nothing was signed", ErrExpired))
+	}
 	signed, err := types.SignTx(tx, signer, signKey)
 	if err != nil {
 		return Result{}, unavailable(fmt.Errorf("sign: %w", err))
@@ -326,7 +366,7 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 	}
 	fmt.Fprintf(out, "\nsent:      %s%s\n", cfg.Net.ExplorerTxPrefix, signed.Hash().Hex())
 
-	waitCtx, cancel := context.WithTimeout(ctx, confirm)
+	waitCtx, cancel := context.WithTimeout(parent, confirm)
 	defer cancel()
 	receipt, err := bind.WaitMined(waitCtx, cfg.Client, signed)
 	if err != nil {

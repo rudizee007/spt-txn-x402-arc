@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/rudizee007/spt-txn-pep/amount"
 	"github.com/rudizee007/spt-txn-pep/gate"
 	"github.com/rudizee007/spt-txn-pep/mcpgate"
@@ -44,7 +46,7 @@ type server struct {
 	cap     capability
 	enf     authorizer
 	settle  settleFunc
-	saveLog func() error // persist the log after every decision (§6)
+	persist func() error // persist the log and the payment count after every decision (§6)
 	onEntry func()       // called after every recorded decision (checkpoints, §5)
 	now     func() time.Time
 	used    *int // ALLOWs issued under this capability; shared with the policy
@@ -98,7 +100,7 @@ func (s *server) write(v interface{}) {
 	s.out.Write(append(b, '\n'))
 }
 
-func (s *server) serve(ctx context.Context, in io.Reader) {
+func (s *server) serve(ctx context.Context, in io.Reader) error {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
@@ -112,6 +114,9 @@ func (s *server) serve(ctx context.Context, in io.Reader) {
 		}
 		s.handle(ctx, req)
 	}
+	// An oversized line or a read error ends the loop. Report it rather than
+	// returning as if the client had closed the stream.
+	return sc.Err()
 }
 
 func (s *server) handle(ctx context.Context, req rpcReq) {
@@ -240,23 +245,28 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 		Expiry:   expiry,
 	}
 	r := s.enf.Authorize(call)
-
-	// §6: the decision is persisted before anything acts on it. If it cannot
-	// be, nothing is settled; an ALLOW's nonce is already spent, so the agent
-	// needs a fresh call, not a retry.
-	if err := s.saveLog(); err != nil {
-		fmt.Fprintf(s.diag, "EVIDENCE FAILURE: log not saved: %v\n", err)
-		return toolText("DENY_UNAVAILABLE: the decision could not be persisted, so nothing was settled", true)
+	// Count an ALLOW before anything else, so a later failure cannot leave the
+	// capability with an authorization it has not counted.
+	if r.Allowed() {
+		*s.used++
 	}
+	// The checkpoint runs after this call is answered, never before
+	// settlement, so it cannot delay a payment toward its expiry.
 	if s.onEntry != nil {
-		s.onEntry()
+		defer s.onEntry()
+	}
+
+	// §6: the decision and the count are persisted before anything acts on
+	// them. If they cannot be, nothing is settled; an ALLOW's nonce is already
+	// spent, so the agent needs a fresh call, not a retry.
+	if err := s.persist(); err != nil {
+		fmt.Fprintf(s.diag, "EVIDENCE FAILURE: decision not persisted: %v\n", err)
+		return toolText("DENY_UNAVAILABLE: the decision could not be persisted, so nothing was settled", true)
 	}
 	if !r.Allowed() {
 		return toolText(fmt.Sprintf("REFUSED by the SPT-Txn enforcement point (%s): %s. Nothing was signed. Log entry %s.",
 			r.Class, r.Reason, orNone(r.LogEntry)), true)
 	}
-	*s.used++
-
 	// I1: every field below comes from the authorized call, except Recipient,
 	// the approved address, which the settler proves the call names.
 	res, err := s.settle(ctx, arcpay.Payment{
@@ -265,11 +275,15 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 		PayToTransport: call.To,
 		AssetTransport: call.Asset,
 		AmountMicro:    call.Amount,
+		NotAfter:       call.Expiry,
 	})
 	if err != nil {
 		fmt.Fprintf(s.diag, "settlement after ALLOW %s failed: %v\n", r.LogEntry, err)
 		return toolText(fmt.Sprintf("AUTHORIZED (log entry %s), but settlement did not complete: %s",
 			r.LogEntry, firstLine(err.Error())), true)
+	}
+	if res.TxHash == (common.Hash{}) {
+		return toolText(fmt.Sprintf("AUTHORIZED (log entry %s). DRY RUN: the pre-sign guard passed; nothing was signed or sent.", r.LogEntry), false)
 	}
 	return toolText(fmt.Sprintf("AUTHORIZED by the SPT-Txn enforcement point and settled on Arc %s through the pre-sign guard.\n"+
 		"  log entry: %s\n  tx: %s%s (block %d)",

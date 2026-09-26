@@ -74,7 +74,7 @@ func realEnforcer(t *testing.T, cp capability, used *int, now func() time.Time) 
 func newTestServer(enf authorizer, settle settleFunc, used *int) *server {
 	return &server{
 		cap: testCap, enf: enf, settle: settle,
-		saveLog: func() error { return nil },
+		persist: func() error { return nil },
 		now:     func() time.Time { return t0 }, used: used,
 		out: io.Discard, diag: io.Discard,
 	}
@@ -126,6 +126,10 @@ func TestSettlerReceivesTheAuthorizedCall(t *testing.T) {
 	if p.Authorization == "" || p.AmountMicro != "500000" || p.Recipient != merchant ||
 		p.PayToTransport != evm.AccountIDBase58(merchant) || p.AssetTransport != evm.AccountIDBase58(testCap.Net.USDC) {
 		t.Fatalf("settler got %+v", p)
+	}
+	// F4: the settler is bounded by the call's expiry: min(now + 60 s, capability expiry).
+	if !p.NotAfter.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("settler deadline %v, want the call's expiry %v", p.NotAfter, t0.Add(time.Minute))
 	}
 }
 
@@ -210,9 +214,13 @@ func TestLogSaveFailurePreventsSettlement(t *testing.T) {
 	rec := &recorder{}
 	used := 0
 	s := newTestServer(realEnforcer(t, testCap, &used, func() time.Time { return t0 }), rec.settle, &used)
-	s.saveLog = func() error { return errors.New("disk full") }
+	s.persist = func() error { return errors.New("disk full") }
 	if text, isErr := call(s, "merchant", "0.5", "invoice:42"); !isErr || len(rec.calls) != 0 {
 		t.Fatalf("settlement ran although the decision was not persisted: %s", text)
+	}
+	// L1: the ALLOW is counted even though persisting it failed.
+	if used != 1 {
+		t.Fatalf("an unpersisted ALLOW was not counted: used=%d", used)
 	}
 }
 
@@ -235,17 +243,21 @@ func TestParseCapability(t *testing.T) {
 		t.Fatalf("good capability: %+v, %v", cp, err)
 	}
 	for name, body := range map[string]string{
-		"unknown field":  strings.Replace(good, `"resource"`, `"extra":1,"resource"`, 1),
-		"trailing data":  good + `{}`,
-		"bad network":    strings.Replace(good, `"testnet"`, `"Mainnet"`, 1),
-		"zero recipient": strings.Replace(good, "0x79A34Cc563f848f626038Ff312CCEBfb5374971d", "0x0000000000000000000000000000000000000000", 1),
-		"no resource":    strings.Replace(good, `"invoice:42"`, `""`, 1),
-		"zero ceiling":   strings.Replace(good, `1000000`, `0`, 1),
-		"no ceiling":     strings.Replace(good, `"max_amount_micro":1000000,`, ``, 1),
-		"expired":        strings.Replace(good, "2026-10-01T13:00:00Z", "2026-10-01T11:00:00Z", 1),
-		"no expiry":      strings.Replace(good, `,"expires_at":"2026-10-01T13:00:00Z"`, ``, 1),
-		"zero payments":  strings.Replace(good, `"resource"`, `"max_payments":0,"resource"`, 1),
-		"not json":       `nope`,
+		"unknown field":                   strings.Replace(good, `"resource"`, `"extra":1,"resource"`, 1),
+		"trailing data":                   good + `{}`,
+		"bad network":                     strings.Replace(good, `"testnet"`, `"Mainnet"`, 1),
+		"zero recipient":                  strings.Replace(good, "0x79A34Cc563f848f626038Ff312CCEBfb5374971d", "0x0000000000000000000000000000000000000000", 1),
+		"no resource":                     strings.Replace(good, `"invoice:42"`, `""`, 1),
+		"zero ceiling":                    strings.Replace(good, `1000000`, `0`, 1),
+		"no ceiling":                      strings.Replace(good, `"max_amount_micro":1000000,`, ``, 1),
+		"expired":                         strings.Replace(good, "2026-10-01T13:00:00Z", "2026-10-01T11:00:00Z", 1),
+		"no expiry":                       strings.Replace(good, `,"expires_at":"2026-10-01T13:00:00Z"`, ``, 1),
+		"zero payments":                   strings.Replace(good, `"resource"`, `"max_payments":0,"resource"`, 1),
+		"not json":                        `nope`,
+		"case-folded duplicate ceiling":   strings.TrimSuffix(good, "}") + `,"MAX_AMOUNT_MICRO":999000000000}`,
+		"case-folded duplicate recipient": strings.TrimSuffix(good, "}") + `,"Recipient":"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}`,
+		"exact duplicate key":             strings.TrimSuffix(good, "}") + `,"resource":"invoice:99"}`,
+		"array, not object":               `[1]`,
 	} {
 		if _, err := parseCapability(strings.NewReader(body), t0); !errors.Is(err, errCapability) {
 			t.Fatalf("%s: accepted (%v)", name, err)
@@ -269,7 +281,9 @@ func TestServeProtocol(t *testing.T) {
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n" +
 		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n" +
 		`{"jsonrpc":"2.0","id":3,"method":"nope"}` + "\n")
-	s.serve(context.Background(), in)
+	if err := s.serve(context.Background(), in); err != nil {
+		t.Fatalf("serve: %v", err)
+	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	if len(lines) != 3 || !strings.Contains(lines[0], "2025-06-18") || !strings.Contains(lines[1], "authorize_payment") || !strings.Contains(lines[2], "-32601") {
 		t.Fatalf("protocol replies: %q", lines)
