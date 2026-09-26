@@ -71,26 +71,26 @@ func (c *checkpointer) publishNow() {
 
 func (c *checkpointer) publish(timeout time.Duration, wait bool) error {
 	root, n := c.log.Head()
-	if n == 0 || n == c.published {
+	if n <= 0 || n == c.published {
 		return nil
 	}
 	// Only a head that is on disk is published. Anchoring an unsaved head
 	// would, after a restart, show two roots on chain for one log size.
 	if n != c.savedSize() {
 		err := fmt.Errorf("head of %d entries is not saved (saved: %d)", n, c.savedSize())
-		fmt.Fprintf(c.diag, "checkpoint skipped: %v\n", err)
+		_, _ = fmt.Fprintf(c.diag, "checkpoint skipped: %v\n", err)
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	hash, err := c.send(ctx, uint64(n), root, wait)
+	hash, err := c.send(ctx, uint64(n), root, wait) // #nosec G115 -- n > 0, checked above
 	if err != nil {
-		fmt.Fprintf(c.diag, "checkpoint of %d entries not published (will retry): %v\n", n, err)
+		_, _ = fmt.Fprintf(c.diag, "checkpoint of %d entries not published (will retry): %v\n", n, err)
 		return err
 	}
 	c.published = n
 	c.last = time.Now()
-	fmt.Fprintf(c.diag, "checkpoint: %d entries, root %x, tx %s%s\n", n, root, c.net.ExplorerTxPrefix, hash.Hex())
+	_, _ = fmt.Fprintf(c.diag, "checkpoint: %d entries, root %x, tx %s%s\n", n, root, c.net.ExplorerTxPrefix, hash.Hex())
 	return nil
 }
 

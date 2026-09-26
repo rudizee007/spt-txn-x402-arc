@@ -27,7 +27,6 @@ var (
 	t0        = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	merchant  = evm.MustParseAddress("0x79A34Cc563f848f626038Ff312CCEBfb5374971d")
 	testCap   = capability{Net: evm.ArcTestnet(), Recipient: merchant, Resource: "invoice:42", MaxMicro: 1_000_000, MaxPayments: 1, ExpiresAt: t0.Add(time.Hour)}
-	errNoPay  = errors.New("test settler refused")
 	anyResult = arcpay.Result{Block: 7}
 )
 

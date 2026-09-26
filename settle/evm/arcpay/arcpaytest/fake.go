@@ -91,12 +91,12 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 			out = append(out, f.answer(q))
 		}
 		b, _ := json.Marshal(out)
-		w.Write(b)
+		_, _ = w.Write(b)
 		return
 	}
 	var q req
 	_ = json.Unmarshal(body, &q)
-	w.Write(f.answer(q))
+	_, _ = w.Write(f.answer(q))
 }
 
 func (f *Fake) answer(q req) json.RawMessage {

@@ -97,7 +97,11 @@ func (s *server) write(v interface{}) {
 	if err != nil {
 		return
 	}
-	s.out.Write(append(b, '\n'))
+	if _, err := s.out.Write(append(b, '\n')); err != nil {
+		// The client cannot receive the reply. Say so where an operator looks;
+		// the decision is already recorded and persisted.
+		_, _ = fmt.Fprintf(s.diag, "protocol write failed: %v\n", err)
+	}
 }
 
 func (s *server) serve(ctx context.Context, in io.Reader) error {
@@ -260,7 +264,7 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 	// them. If they cannot be, nothing is settled; an ALLOW's nonce is already
 	// spent, so the agent needs a fresh call, not a retry.
 	if err := s.persist(); err != nil {
-		fmt.Fprintf(s.diag, "EVIDENCE FAILURE: decision not persisted: %v\n", err)
+		_, _ = fmt.Fprintf(s.diag, "EVIDENCE FAILURE: decision not persisted: %v\n", err)
 		return toolText("DENY_UNAVAILABLE: the decision could not be persisted, so nothing was settled", true)
 	}
 	if !r.Allowed() {
@@ -278,7 +282,7 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 		NotAfter:       call.Expiry,
 	})
 	if err != nil {
-		fmt.Fprintf(s.diag, "settlement after ALLOW %s failed: %v\n", r.LogEntry, err)
+		_, _ = fmt.Fprintf(s.diag, "settlement after ALLOW %s failed: %v\n", r.LogEntry, err)
 		return toolText(fmt.Sprintf("AUTHORIZED (log entry %s), but settlement did not complete: %s",
 			r.LogEntry, firstLine(err.Error())), true)
 	}

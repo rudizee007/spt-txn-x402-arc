@@ -170,6 +170,9 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 	if out == nil {
 		out = io.Discard
 	}
+	// Progress lines are for the operator; a failed write to them never
+	// changes a settlement.
+	say := func(format string, a ...any) { _, _ = fmt.Fprintf(out, format, a...) }
 	amount, err := checkPayment(cfg.Net, p)
 	if err != nil {
 		return Result{}, err
@@ -223,7 +226,7 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 	if err != nil {
 		return Result{}, unavailable(fmt.Errorf("balanceOf(%s): %w", payer, err))
 	}
-	fmt.Fprintf(out, "balance:   %s micro-USDC (%s USDC)\n", bal, USDC(bal))
+	say("balance:   %s micro-USDC (%s USDC)\n", bal, USDC(bal))
 	if bal.Cmp(amount) < 0 || bal.Sign() == 0 {
 		return Result{}, unavailable(fmt.Errorf("insufficient USDC: have %s, need %s micro-USDC in %s", bal, amount, payer))
 	}
@@ -231,7 +234,7 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 	if err != nil {
 		return Result{}, violation(err)
 	}
-	fmt.Fprintf(out, "decimals:  native/ERC-20 relation confirmed against the chain (10^12, residue %s native units)\n", dust)
+	say("decimals:  native/ERC-20 relation confirmed against the chain (10^12, residue %s native units)\n", dust)
 
 	// ── 3. Nonce and fees ──────────────────────────────────────────────────
 	nonce, err := BoundNonce(ctx, cfg.Client, payer)
@@ -263,7 +266,7 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 
 	plan := NewPlan(cfg.Net, merchant, payer, amount, nonce, feeCap, tip)
 	if d.Tamper != nil {
-		fmt.Fprintf(out, "\n[tamper] %s\n", d.Label)
+		say("\n[tamper] %s\n", d.Label)
 		d.Tamper(&plan)
 	}
 
@@ -280,7 +283,7 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 		// A tampered payload may be un-estimatable. The guard, not the RPC, is
 		// what must refuse it, so use a fixed limit and let the guard decide.
 		gasLimit = 100_000
-		fmt.Fprintf(out, "note:      gas estimation failed (%v); using %d so the guard still runs\n", err, gasLimit)
+		say("note:      gas estimation failed (%v); using %d so the guard still runs\n", err, gasLimit)
 	case err != nil:
 		return Result{}, unavailable(fmt.Errorf("estimate gas: %w", err))
 	case gasLimit > MaxGasLimit:
@@ -289,9 +292,9 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 		gasLimit += gasLimit / 5 // 20% headroom; cannot overflow, gasLimit <= MaxGasLimit
 	}
 	plan.GasLimit = gasLimit
-	fmt.Fprintf(out, "\ngas limit: %d\n", gasLimit)
-	fmt.Fprintf(out, "fee cap:   %s per gas (base %s + tip %s)\n", feeCap, head.BaseFee, tip)
-	fmt.Fprintf(out, "worst-case fee: %s of %s native units\n", new(big.Int).Mul(new(big.Int).SetUint64(gasLimit), feeCap), maxGasCost)
+	say("\ngas limit: %d\n", gasLimit)
+	say("fee cap:   %s per gas (base %s + tip %s)\n", feeCap, head.BaseFee, tip)
+	say("worst-case fee: %s of %s native units\n", new(big.Int).Mul(new(big.Int).SetUint64(gasLimit), feeCap), maxGasCost)
 
 	// ── 5. Bind the payment the enforcement point authorized ───────────────
 	bound, err := NewBinding(cfg.Net, merchant, payer, amount, nonce, maxGasCost)
@@ -327,9 +330,9 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 		return Result{}, violation(fmt.Errorf("REFUSING TO SIGN: the settle guard rejected the transaction: %w\n"+
 			"  Nothing was signed. Nothing was broadcast. No funds moved.", err))
 	}
-	fmt.Fprintf(out, "\nguard:     PASS: the transaction matches the authorized payment\n")
+	say("\nguard:     PASS: the transaction matches the authorized payment\n")
 	if d.DryRun {
-		fmt.Fprintln(out, "dry run:   stopping before the signature, as asked.")
+		say("dry run:   stopping before the signature, as asked.\n")
 		return Result{Payer: payer}, nil
 	}
 
@@ -337,7 +340,7 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 	signKey := cfg.Key
 	if d.DecoyKey != nil {
 		signKey = d.DecoyKey
-		fmt.Fprintf(out, "[tamper]   signing with an unauthorized key %s\n", crypto.PubkeyToAddress(d.DecoyKey.PublicKey))
+		say("[tamper]   signing with an unauthorized key %s\n", crypto.PubkeyToAddress(d.DecoyKey.PublicKey))
 	}
 	if !now().Before(p.NotAfter) {
 		return Result{}, violation(fmt.Errorf("%w; nothing was signed", ErrExpired))
@@ -358,13 +361,13 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 		return Result{}, violation(fmt.Errorf("REFUSING TO BROADCAST: the signed transaction is not the one that was verified: %w\n"+
 			"  A signature exists in memory and is being discarded. Nothing was broadcast. No funds moved.", err))
 	}
-	fmt.Fprintf(out, "post-sign: PASS: recovered sender %s matches, every field unchanged\n", sender)
+	say("post-sign: PASS: recovered sender %s matches, every field unchanged\n", sender)
 
 	// ── 10. Broadcast and confirm ──────────────────────────────────────────
 	if err := cfg.Client.SendTransaction(ctx, signed); err != nil {
 		return Result{}, unavailable(fmt.Errorf("broadcast: %w", err))
 	}
-	fmt.Fprintf(out, "\nsent:      %s%s\n", cfg.Net.ExplorerTxPrefix, signed.Hash().Hex())
+	say("\nsent:      %s%s\n", cfg.Net.ExplorerTxPrefix, signed.Hash().Hex())
 
 	waitCtx, cancel := context.WithTimeout(parent, confirm)
 	defer cancel()

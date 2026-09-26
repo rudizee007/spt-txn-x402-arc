@@ -85,7 +85,7 @@ func writeKey(t *testing.T, dir, name, hexKey string) string {
 // L5: startup refuses the payment key in the checkpoint role.
 func TestLoadKeysRefusesOneKeyInBothRoles(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- a directory; 0700 is owner-only
 		t.Fatal(err)
 	}
 	k := strings.Repeat("11", 32)
@@ -153,7 +153,10 @@ func TestCheckpointPublishesTheSavedHead(t *testing.T) {
 	tx := sent[0]
 	root, n := l.Head()
 	from := crypto.PubkeyToAddress(cp.key.PublicKey)
-	if tx.To() == nil || *tx.To() != from || tx.Value().Sign() != 0 || string(tx.Data()) != string(evm.CheckpointData(uint64(n), root)) {
+	if n <= 0 {
+		t.Fatalf("head size %d", n)
+	}
+	if tx.To() == nil || *tx.To() != from || tx.Value().Sign() != 0 || string(tx.Data()) != string(evm.CheckpointData(uint64(n), root)) { // #nosec G115 -- n > 0
 		t.Fatalf("checkpoint transaction: to=%v value=%v data=%x", tx.To(), tx.Value(), tx.Data())
 	}
 	cp.publishNow()
@@ -199,5 +202,29 @@ func TestCheckpointRefusesHostileEndpoint(t *testing.T) {
 				t.Fatal("a checkpoint was sent through a hostile endpoint")
 			}
 		})
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+// A reply that cannot be written is reported to the operator, not dropped.
+func TestProtocolWriteFailureIsReported(t *testing.T) {
+	used := 0
+	var diag strings.Builder
+	s := newTestServer(&fixedAuthorizer{res: mcpgate.Result{Class: gate.DenyViolation}}, (&recorder{}).settle, &used)
+	s.out, s.diag = failingWriter{}, &diag
+	_ = s.serve(context.Background(), strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`+"\n"))
+	if !strings.Contains(diag.String(), "protocol write failed") {
+		t.Fatalf("a failed reply was not reported: %q", diag.String())
+	}
+}
+
+// The count cannot be silently lost: a count file that cannot be written is an
+// error, which the server turns into "nothing settled".
+func TestSaveCountFailureIsAnError(t *testing.T) {
+	if err := saveCount(filepath.Join(t.TempDir(), "missing-dir", "log.json.count"), [32]byte{1}, 1); err == nil {
+		t.Fatal("a count that could not be written was reported as saved")
 	}
 }

@@ -104,7 +104,8 @@ func parseCapability(r io.Reader, now time.Time) (capability, error) {
 // loadCapability reads and parses a capability file, and returns the SHA-256
 // of its exact bytes, which keys the persisted payment count.
 func loadCapability(path string, now time.Time) (capability, [32]byte, error) {
-	raw, err := os.ReadFile(path)
+	// #nosec G304 -- the operator names the capability file on the command line.
+	raw, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return capability{}, [32]byte{}, fmt.Errorf("%w: %v", errCapability, err)
 	}
@@ -123,7 +124,8 @@ type countState struct {
 // loadCount returns the count recorded for this capability, or 0 if the file
 // is absent or records a different capability. A malformed file is refused.
 func loadCount(path string, digest [32]byte) (int, error) {
-	raw, err := os.ReadFile(path)
+	// #nosec G304 -- derived from the operator's -log path.
+	raw, err := os.ReadFile(filepath.Clean(path))
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
@@ -150,20 +152,19 @@ func saveCount(path string, digest [32]byte, allows int) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
+	// Removing the temp file is best effort: after a successful rename it no
+	// longer exists, and on a failure the write error is the one reported.
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	write := func() error {
+		if err := tmp.Chmod(0o600); err != nil {
+			return err
+		}
+		if _, err := tmp.Write(b); err != nil {
+			return err
+		}
+		return tmp.Sync()
 	}
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
+	if err := errors.Join(write(), tmp.Close()); err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)

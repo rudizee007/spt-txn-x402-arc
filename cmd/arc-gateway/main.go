@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -187,7 +188,9 @@ func loadEd25519(path string) (ed25519.PrivateKey, error) {
 	if err := arcpay.CheckKeyFile(path); err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(path)
+	// #nosec G304 -- the operator names the log key file on the command line,
+	// and CheckKeyFile has already refused an exposed or replaceable file.
+	raw, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return nil, fmt.Errorf("%w: read %s: %w", arcpay.ErrUnavailable, path, err)
 	}
