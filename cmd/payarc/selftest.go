@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm"
+	"github.com/rudizee007/spt-txn-x402-arc/settle/evm/arcpay"
 )
 
 // runSelfTest builds every adversarial transaction this command can build and
@@ -48,15 +49,15 @@ func runSelfTest(net evm.ArcNetwork) int {
 	merchant := common.Address(evm.MustParseAddress("0x2222222222222222222222222222222222222222"))
 	asset := common.Address(net.USDC)
 
-	bound, err := newBinding(net, merchant, payer, big.NewInt(amount), nonce, maxGasCost)
+	bound, err := arcpay.NewBinding(net, merchant, payer, big.NewInt(amount), nonce, maxGasCost)
 	if err != nil {
 		fmt.Printf("FAIL  binding: %v\n", err)
 		return 1
 	}
-	signer := newSigner(net)
+	signer := arcpay.NewSigner(net)
 
-	base := newPlan(net, merchant, payer, big.NewInt(amount), nonce, feeCap, big.NewInt(1))
-	base.gasLimit = gasLimit
+	base := arcpay.NewPlan(net, merchant, payer, big.NewInt(amount), nonce, feeCap, big.NewInt(1))
+	base.GasLimit = gasLimit
 
 	fmt.Println("selftest — SPEC-X402-ARC §A.4, offline, ephemeral key, nothing broadcast")
 	fmt.Printf("  network   %s %s (chain id %d)\n", net.Name, net.CAIP2, net.ChainID)
@@ -89,7 +90,7 @@ func runSelfTest(net evm.ArcNetwork) int {
 
 	// The selector differential, run here too so -selftest is a complete
 	// preflight rather than a subset of one.
-	if err := assertSelector(); err != nil {
+	if err := arcpay.AssertSelector(); err != nil {
 		fmt.Printf("FAIL  %-11s  %v\n", "selector-kat", err)
 		fail++
 	} else {
@@ -101,7 +102,7 @@ func runSelfTest(net evm.ArcNetwork) int {
 	verified, err := evm.Verify(mustView(base, payer), bound)
 	report("clean", err, nil)
 	if err == nil {
-		signed, serr := types.SignTx(base.build(), signer, payerKey)
+		signed, serr := types.SignTx(build(base), signer, payerKey)
 		if serr != nil {
 			fmt.Printf("FAIL  %-11s  sign: %v\n", "clean-signed", serr)
 			fail++
@@ -114,7 +115,7 @@ func runSelfTest(net evm.ArcNetwork) int {
 				fmt.Printf("FAIL  %-11s  recovered %s, signed with %s\n", "clean-signed", sender, payer)
 				fail++
 			} else {
-				view, verr := viewOf(signed, evm.Address(sender))
+				view, verr := arcpay.ViewOf(signed, evm.Address(sender))
 				if verr != nil {
 					fmt.Printf("FAIL  %-11s  %v\n", "clean-signed", verr)
 					fail++
@@ -131,11 +132,11 @@ func runSelfTest(net evm.ArcNetwork) int {
 	for _, name := range sortedModes() {
 		mode := tamperModes[name]
 		p := base
-		p.amount = new(big.Int).Set(base.amount)
+		p.Amount = new(big.Int).Set(base.Amount)
 		mode.apply(&p)
 
 		if !mode.postSign {
-			view, verr := viewOf(p.build(), evm.Address(payer))
+			view, verr := arcpay.ViewOf(build(p), evm.Address(payer))
 			if verr != nil {
 				report(name, verr, mode.wantErr)
 				continue
@@ -149,7 +150,7 @@ func runSelfTest(net evm.ArcNetwork) int {
 		// it cannot see who will sign), and the post-sign re-check must catch
 		// it. A mode that the pre-sign guard already refuses proves nothing
 		// about the post-sign leg, so that is a failure too.
-		view, verr := viewOf(p.build(), evm.Address(payer))
+		view, verr := arcpay.ViewOf(build(p), evm.Address(payer))
 		if verr != nil {
 			fmt.Printf("FAIL  %-11s  %v\n", name, verr)
 			fail++
@@ -162,7 +163,7 @@ func runSelfTest(net evm.ArcNetwork) int {
 			continue
 		}
 		decoy, _ := crypto.GenerateKey()
-		signed, serr := types.SignTx(p.build(), signer, decoy)
+		signed, serr := types.SignTx(build(p), signer, decoy)
 		if serr != nil {
 			fmt.Printf("FAIL  %-11s  sign: %v\n", name, serr)
 			fail++
@@ -174,7 +175,7 @@ func runSelfTest(net evm.ArcNetwork) int {
 			fail++
 			continue
 		}
-		signedView, verr := viewOf(signed, evm.Address(sender))
+		signedView, verr := arcpay.ViewOf(signed, evm.Address(sender))
 		if verr != nil {
 			fmt.Printf("FAIL  %-11s  %v\n", name, verr)
 			fail++
@@ -194,10 +195,20 @@ func runSelfTest(net evm.ArcNetwork) int {
 
 // mustView builds the guard's view of a plan's transaction, treating a read
 // failure as a refusal rather than a panic.
-func mustView(p plan, signer common.Address) evm.Transaction {
-	v, err := viewOf(p.build(), evm.Address(signer))
+func mustView(p arcpay.Plan, signer common.Address) evm.Transaction {
+	v, err := arcpay.ViewOf(build(p), evm.Address(signer))
 	if err != nil {
 		return evm.Transaction{}
 	}
 	return v
+}
+
+// build returns the plan's transaction. A plan the selftest constructs always
+// encodes, so a failure here is a bug in the selftest itself.
+func build(p arcpay.Plan) *types.Transaction {
+	tx, err := p.Build()
+	if err != nil {
+		panic("selftest: " + err.Error())
+	}
+	return tx
 }
