@@ -13,14 +13,16 @@ var (
 
 func cpPair() (Transaction, CheckpointBinding) {
 	to := cpFrom
-	return Transaction{
+	tx := Transaction{
 		Type: TxTypeDynamicFee, ChainID: ArcMainnetChainID, Nonce: 3,
 		GasLimit: 30_000, MaxFeePerGas: big.NewInt(40_000_000_000),
 		To: &to, Value: big.NewInt(0), Data: CheckpointData(12, cpRoot), Signer: cpFrom,
-	}, CheckpointBinding{
+	}
+	b := CheckpointBinding{
 		ChainID: ArcMainnetChainID, From: cpFrom, Nonce: 3, N: 12, Root: cpRoot,
 		MaxGasCost: new(big.Int).Mul(big.NewInt(30_000), big.NewInt(40_000_000_000)),
 	}
+	return tx, b
 }
 
 func TestCheckpointData_Layout(t *testing.T) {
