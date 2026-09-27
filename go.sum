@@ -182,8 +182,8 @@ github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0t
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/rs/cors v1.7.0 h1:+88SsELBHx5r+hZ8TCkggzSstaWNbDvThkVK8H6f9ik=
 github.com/rs/cors v1.7.0/go.mod h1:gFx+x8UowdsKA9AchylcLynDq+nNFfI8FkUZdN/jGCU=
-github.com/rudizee007/spt-txn-pep v0.4.0 h1:7rM7CM4FjHLp7pLq8aVMSIvD5b67glhZRpFvoiLGNQM=
-github.com/rudizee007/spt-txn-pep v0.4.0/go.mod h1:B97lyk3FfE/+ITTdei79VN8N5T92VXjQX+d/waYz0og=
+github.com/rudizee007/spt-txn-pep v0.7.0 h1:14G6W23X1x4JhQd91jFIWC1AwK+JXe8P3s7kZFdeh6U=
+github.com/rudizee007/spt-txn-pep v0.7.0/go.mod h1:B97lyk3FfE/+ITTdei79VN8N5T92VXjQX+d/waYz0og=
 github.com/russross/blackfriday/v2 v2.1.0 h1:JIOH55/0cWyOuilr9/qlrm0BSXldqnqwMsf35Ld67mk=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
 github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible h1:Bn1aCHHRnjv4Bl16T8rcaFjYSrGrIZvpiGO6P3Q4GpU=

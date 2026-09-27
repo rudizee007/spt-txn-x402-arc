@@ -4,7 +4,7 @@ go 1.25.13
 
 require (
 	github.com/ethereum/go-ethereum v1.17.5
-	github.com/rudizee007/spt-txn-pep v0.4.0
+	github.com/rudizee007/spt-txn-pep v0.7.0
 )
 
 require (
