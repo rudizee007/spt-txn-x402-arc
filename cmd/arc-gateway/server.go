@@ -168,16 +168,38 @@ func (s *server) handle(ctx context.Context, req rpcReq) {
 }
 
 // toolName is the one tool this server offers: evaluate_payment in
-// evaluate-only mode, authorize_payment otherwise. The two never coexist.
+// evaluate-only mode, authorize_payment in live and dry-run mode. The two never
+// coexist, and a server in any other mode offers no tool at all.
 func (s *server) toolName() string {
-	if s.mode == modeEvaluate {
+	switch s.mode {
+	case modeEvaluate:
 		return "evaluate_payment"
+	case modeLive, modeDryRun:
+		return "authorize_payment"
 	}
-	return "authorize_payment"
+	return ""
 }
 
-// broadcast reports whether this server can put a transaction on chain.
-func (s *server) broadcast() bool { return s.mode == modeLive }
+// payments states what an ALLOW does to a payment in this mode.
+func (s *server) payments() string {
+	switch s.mode {
+	case modeLive:
+		return "settled on ALLOW"
+	case modeDryRun:
+		return "guard only, nothing signed"
+	}
+	return "no payment key, none can be sent"
+}
+
+// checkpoints states whether log checkpoints are published. They are the only
+// transactions a dry-run or evaluate-only server sends; they carry no value and
+// are signed with their own key, which pays their gas.
+func (s *server) checkpoints() string {
+	if s.onEntry != nil {
+		return "on, from a separate gas-only key"
+	}
+	return "off"
+}
 
 func (s *server) toolDescription() string {
 	policy := "It is allowed only if it matches the one capability a human approved: recipient, " +
@@ -187,10 +209,13 @@ func (s *server) toolDescription() string {
 	case modeEvaluate:
 		return "Ask the SPT-Txn enforcement point whether a proposed USDC payment on Arc would be " +
 			"allowed, and why. Evaluate-only: this server holds NO payment key and cannot sign or " +
-			"send any transaction, so calling this tool can never move funds. " + policy
+			"send any payment, so calling this tool cannot make a payment. The only transactions it " +
+			"sends are log checkpoints, which carry no value and are paid for by a separate key " +
+			"that holds only gas. " + policy
 	case modeDryRun:
 		return "Ask the SPT-Txn enforcement point to authorize a USDC payment on Arc. DRY RUN: on " +
-			"ALLOW the pre-sign guard runs but nothing is signed or sent. " + policy
+			"ALLOW the pre-sign guard runs but no payment is signed or sent; log checkpoints are " +
+			"still published from a separate gas-only key. " + policy
 	}
 	return "Ask the SPT-Txn enforcement point to authorize and settle a USDC payment on Arc. The " +
 		"agent holds no keys; on ALLOW the enforcement point settles REAL USDC through a pre-sign " +
@@ -200,10 +225,14 @@ func (s *server) toolDescription() string {
 // reply is a tool result whose first line states the mode, so what the server
 // can do is part of every answer, not something an operator has to vouch for.
 func (s *server) reply(text string, isError bool) interface{} {
-	return toolText(fmt.Sprintf("[mode: %s; broadcast: %t]\n%s", s.mode, s.broadcast(), text), isError)
+	return toolText(fmt.Sprintf("[mode: %s; payments: %s; checkpoints: %s]\n%s",
+		s.mode, s.payments(), s.checkpoints(), text), isError)
 }
 
 func (s *server) toolsList() interface{} {
+	if s.toolName() == "" {
+		return map[string]interface{}{"tools": []interface{}{}}
+	}
 	return map[string]interface{}{
 		"tools": []interface{}{
 			map[string]interface{}{
@@ -257,6 +286,9 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 	dec.UseNumber()
 	if err := dec.Decode(&p); err != nil {
 		return s.reply("invalid tool arguments", true)
+	}
+	if s.toolName() == "" {
+		return s.reply("DENY_UNAVAILABLE: this server has no valid mode and refuses every call", true)
 	}
 	if p.Name != s.toolName() {
 		return s.reply("unknown tool: "+p.Name, true)
@@ -312,10 +344,14 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 		return s.reply(fmt.Sprintf("REFUSED by the SPT-Txn enforcement point (%s): %s. Nothing was signed. Log entry %s.",
 			r.Class, r.Reason, orNone(r.LogEntry)), true)
 	}
-	// §6a: in evaluate-only mode there is no settler; the decision is the answer.
-	if s.mode == modeEvaluate || s.settle == nil {
+	// §6a: in evaluate-only mode the decision is the answer, even if a settler
+	// were somehow present.
+	if s.mode == modeEvaluate {
 		return s.reply(fmt.Sprintf("ALLOWED by the SPT-Txn enforcement point (log entry %s). "+
 			"Evaluate-only: this server holds no payment key; nothing was signed or sent.", r.LogEntry), false)
+	}
+	if s.settle == nil {
+		return s.reply(fmt.Sprintf("AUTHORIZED (log entry %s), but this server has no settler; nothing was signed or sent.", r.LogEntry), true)
 	}
 
 	// I1: every field below comes from the authorized call, except Recipient,

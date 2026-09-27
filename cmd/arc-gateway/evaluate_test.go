@@ -23,19 +23,23 @@ func TestResolveMode(t *testing.T) {
 	cases := []struct {
 		eval, dry bool
 		key       string
+		extra     []string
 		want      string
 		wantErr   error
 	}{
-		{false, false, "pay.key", modeLive, nil},
-		{false, true, "pay.key", modeDryRun, nil},
-		{true, false, "", modeEvaluate, nil},
-		{true, false, "pay.key", "", arcpay.ErrViolation},
-		{true, true, "", "", arcpay.ErrViolation},
-		{false, false, "", "", arcpay.ErrUnavailable},
-		{false, true, "", "", arcpay.ErrUnavailable},
+		{false, false, "pay.key", nil, modeLive, nil},
+		{false, true, "pay.key", nil, modeDryRun, nil},
+		{true, false, "", nil, modeEvaluate, nil},
+		{true, false, "pay.key", nil, "", arcpay.ErrViolation},
+		{true, true, "", nil, "", arcpay.ErrViolation},
+		{false, false, "", nil, "", arcpay.ErrUnavailable},
+		{false, true, "", nil, "", arcpay.ErrUnavailable},
+		// A stray argument ends flag parsing; -evaluate-only after it would be lost.
+		{false, false, "pay.key", []string{"stray", "-evaluate-only"}, "", arcpay.ErrViolation},
+		{true, false, "", []string{"stray"}, "", arcpay.ErrViolation},
 	}
 	for _, c := range cases {
-		got, err := resolveMode(c.eval, c.dry, c.key)
+		got, err := resolveMode(c.eval, c.dry, c.key, c.extra)
 		errOK := errors.Is(err, c.wantErr)
 		if c.wantErr == nil {
 			errOK = err == nil
@@ -60,7 +64,7 @@ func TestEvaluateOnlyOffersOnlyTheSideEffectFreeTool(t *testing.T) {
 	s, _ := evaluateServer(t, nil)
 	list, _ := json.Marshal(s.toolsList())
 	if !bytes.Contains(list, []byte(`"evaluate_payment"`)) || bytes.Contains(list, []byte(`"authorize_payment"`)) ||
-		!bytes.Contains(list, []byte("cannot sign or send any transaction")) {
+		!bytes.Contains(list, []byte("cannot sign or send any payment")) {
 		t.Fatalf("evaluate-only tools/list: %s", list)
 	}
 	params, _ := json.Marshal(map[string]interface{}{"name": "authorize_payment",
@@ -109,9 +113,9 @@ func TestEvaluateOnlyRefusesLikeLive(t *testing.T) {
 // Every reply states the mode and whether anything can be broadcast.
 func TestEveryReplyStatesTheMode(t *testing.T) {
 	for mode, want := range map[string]string{
-		modeLive:     "[mode: live; broadcast: true]",
-		modeDryRun:   "[mode: dry-run; broadcast: false]",
-		modeEvaluate: "[mode: evaluate-only; broadcast: false]",
+		modeLive:     "[mode: live; payments: settled on ALLOW; checkpoints: off]",
+		modeDryRun:   "[mode: dry-run; payments: guard only, nothing signed; checkpoints: off]",
+		modeEvaluate: "[mode: evaluate-only; payments: no payment key, none can be sent; checkpoints: off]",
 	} {
 		used := 0
 		s := newTestServer(&fixedAuthorizer{res: mcpgate.Result{Class: gate.DenyViolation, LogEntry: "0:ab"}}, (&recorder{}).settle, &used)
@@ -120,5 +124,69 @@ func TestEveryReplyStatesTheMode(t *testing.T) {
 		if !strings.HasPrefix(text, want) {
 			t.Fatalf("%s reply does not start with %q: %q", mode, want, text)
 		}
+	}
+}
+
+// The prefix says checkpoints are on when they are.
+func TestReplyStatesCheckpoints(t *testing.T) {
+	s, _ := evaluateServer(t, nil)
+	s.onEntry = func() {}
+	text, _ := call(s, "attacker", "0.5", "invoice:42")
+	if !strings.HasPrefix(text, "[mode: evaluate-only; payments: no payment key, none can be sent; checkpoints: on, from a separate gas-only key]") {
+		t.Fatalf("prefix with checkpoints: %q", text)
+	}
+}
+
+func callNamed(s *server, name string) (string, bool) {
+	params, _ := json.Marshal(map[string]interface{}{"name": name,
+		"arguments": map[string]interface{}{"to": "merchant", "amount_usdc": json.Number("0.5"), "resource": "invoice:42"}})
+	res := s.toolsCall(context.Background(), params).(map[string]interface{})
+	return res["content"].([]interface{})[0].(map[string]interface{})["text"].(string), res["isError"].(bool)
+}
+
+// A live or dry-run server never answers evaluate_payment: a host that treats
+// that name as side-effect free must not reach a settler through it.
+func TestSettlingServersRefuseEvaluatePayment(t *testing.T) {
+	for _, mode := range []string{modeLive, modeDryRun} {
+		rec := &recorder{}
+		used := 0
+		s := newTestServer(&fixedAuthorizer{res: mcpgate.Result{Class: gate.Allow, LogEntry: "0:ab"}}, rec.settle, &used)
+		s.mode = mode
+		text, isErr := callNamed(s, "evaluate_payment")
+		if !isErr || !strings.Contains(text, "unknown tool") || len(rec.calls) != 0 {
+			t.Fatalf("%s server answered evaluate_payment (settled %d): %s", mode, len(rec.calls), text)
+		}
+	}
+}
+
+// A server whose mode is not one of the three offers no tool and refuses every
+// call, so a wiring mistake cannot produce a settling server that describes
+// itself as something else.
+func TestUnknownModeRefusesEverything(t *testing.T) {
+	for _, mode := range []string{"", "LIVE", "evaluate"} {
+		rec := &recorder{}
+		used := 0
+		s := newTestServer(&fixedAuthorizer{res: mcpgate.Result{Class: gate.Allow, LogEntry: "0:ab"}}, rec.settle, &used)
+		s.mode = mode
+		list, _ := json.Marshal(s.toolsList())
+		if !bytes.Equal(list, []byte(`{"tools":[]}`)) {
+			t.Fatalf("mode %q lists tools: %s", mode, list)
+		}
+		for _, name := range []string{"authorize_payment", "evaluate_payment", ""} {
+			if text, isErr := callNamed(s, name); !isErr || len(rec.calls) != 0 || !strings.Contains(text, "no valid mode") {
+				t.Fatalf("mode %q, tool %q: settled %d, %s", mode, name, len(rec.calls), text)
+			}
+		}
+	}
+}
+
+// A live server built without a settler reports an error, never an ALLOW that
+// reads like an evaluation.
+func TestLiveWithoutSettlerIsAnError(t *testing.T) {
+	used := 0
+	s := newTestServer(&fixedAuthorizer{res: mcpgate.Result{Class: gate.Allow, LogEntry: "0:ab"}}, nil, &used)
+	text, isErr := call(s, "merchant", "0.5", "invoice:42")
+	if !isErr || !strings.Contains(text, "no settler") || strings.Contains(text, "Evaluate-only") {
+		t.Fatalf("live server without a settler: %s", text)
 	}
 }

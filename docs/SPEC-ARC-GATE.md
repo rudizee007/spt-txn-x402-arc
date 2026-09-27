@@ -227,17 +227,35 @@ checkpointed on Arc, as in live mode.
 
 **Rules.**
 - `-evaluate-only` refuses to start if `-key` or `-dry-run` is given. A payment key
-  in this mode is a configuration error, not something to ignore.
+  in this mode is a configuration error, not something to ignore. Startup also
+  refuses any positional argument, because flag parsing stops there and every
+  flag after it, `-evaluate-only` included, would be silently dropped.
 - The two tools never coexist: in evaluate-only mode `authorize_payment` is an
   unknown tool, and in live or dry-run mode `evaluate_payment` is.
-- Every reply begins with the mode and whether anything can be broadcast, for
-  example `[mode: evaluate-only; broadcast: false]`, so the guarantee is part of the
-  interface.
+- Every reply begins with the mode, what an ALLOW does to a payment, and whether
+  log checkpoints are published, for example
+  `[mode: evaluate-only; payments: no payment key, none can be sent; checkpoints: on, from a separate gas-only key]`,
+  so the guarantee is part of the interface. Checkpoints are named because on Arc
+  their gas is paid in USDC: "no transaction is sent" would be false.
+- A server in any other mode offers no tool and refuses every call, so a wiring
+  mistake cannot yield a settling server that describes itself otherwise. A live
+  server with no settler reports an error, never an ALLOW.
 - An ALLOW in evaluate-only mode is recorded and counts toward `max_payments`, like
   any other ALLOW. An operator who means to settle under a capability later does
   not issue an allowed evaluation under it first.
 - Checkpoints work in every mode; the checkpoint key can only publish checkpoints
   (§5).
+
+**Residuals, stated rather than hidden.**
+- In evaluate-only mode there is no payment key to compare with, so startup cannot
+  refuse a checkpoint key that is in fact the payment wallet's key, as live mode
+  does. Such a key could still only publish checkpoints (the §5 guard holds), but
+  it would spend the payment wallet's gas and share its nonces with any live
+  server using the same wallet.
+- The log records the decision, not the mode. An evaluate-only ALLOW and a live
+  ALLOW are identical entries; a reader of one log shared across modes cannot tell
+  an evaluation from an authorization that was settled. The settlement itself is
+  on chain and can be matched to its log entry.
 
 ## 7. Out of scope
 

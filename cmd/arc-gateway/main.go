@@ -60,7 +60,7 @@ func main() {
 	verifyRPC := flag.String("verify-rpc", "", "optional second, independent endpoint; the payer's nonce must agree on both (recommended on mainnet)")
 	flag.Parse()
 
-	mode, err := resolveMode(*evaluateOnly, *dryRun, *keyPath)
+	mode, err := resolveMode(*evaluateOnly, *dryRun, *keyPath, flag.Args())
 	if err != nil {
 		fatal(err)
 	}
@@ -196,7 +196,7 @@ func main() {
 	case modeDryRun:
 		fmt.Fprintln(os.Stderr, "  DRY RUN: the guard runs, nothing is signed or sent")
 	case modeEvaluate:
-		fmt.Fprintln(os.Stderr, "  EVALUATE-ONLY: no payment key loaded; decisions only, nothing can be signed or sent")
+		fmt.Fprintln(os.Stderr, "  EVALUATE-ONLY: no payment key loaded; no payment can be signed or sent (checkpoints only)")
 	}
 	serr := s.serve(ctx, os.Stdin)
 	cp.publishNow() // one more checkpoint of the last saved head
@@ -287,8 +287,12 @@ func distinctKeys(pay, checkpoint common.Address) error {
 // resolveMode fixes the server's mode from its flags (SPEC-ARC-GATE §6a).
 // Evaluate-only refuses a payment key and -dry-run; the other modes require a
 // payment key.
-func resolveMode(evaluateOnly, dryRun bool, keyPath string) (string, error) {
+func resolveMode(evaluateOnly, dryRun bool, keyPath string, extra []string) (string, error) {
 	switch {
+	case len(extra) > 0:
+		// flag stops at the first non-flag argument, so every flag after it,
+		// -evaluate-only included, would be silently ignored.
+		return "", fmt.Errorf("%w: unexpected argument %q; every flag after it would be ignored", arcpay.ErrViolation, extra[0])
 	case evaluateOnly && keyPath != "":
 		return "", fmt.Errorf("%w: -evaluate-only holds no payment key; remove -key", arcpay.ErrViolation)
 	case evaluateOnly && dryRun:
