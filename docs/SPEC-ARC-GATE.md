@@ -207,6 +207,38 @@ append, before the tool-call returns; if the save fails, the call returns an
 error and settlement does not run. On restart the log is loaded and verified
 (`translog.LoadLog`) before the server accepts a call.
 
+## 6a. Modes, and an evaluate-only mode an agent can verify
+
+The server runs in exactly one of three modes, fixed at startup:
+
+| Mode | Flag | Payment key | Tool | On ALLOW |
+|---|---|---|---|---|
+| live | (none) | required | `authorize_payment` | settles through the guard |
+| dry-run | `-dry-run` | required | `authorize_payment` | runs the guard, signs nothing |
+| evaluate-only | `-evaluate-only` | **refused** | `evaluate_payment` | returns the decision, settles nothing |
+
+**Why evaluate-only exists.** A careful agent will not call a tool that can move
+funds on an operator's say-so, because it cannot see how the server was started.
+In evaluate-only mode the server holds no payment key, so it has nothing to sign
+with, and it offers a differently named tool whose description says so. An agent
+can probe the policy with no funds at risk, and the refusal it sees is the same
+decision, from the same enforcement point, recorded in the same signed log and
+checkpointed on Arc, as in live mode.
+
+**Rules.**
+- `-evaluate-only` refuses to start if `-key` or `-dry-run` is given. A payment key
+  in this mode is a configuration error, not something to ignore.
+- The two tools never coexist: in evaluate-only mode `authorize_payment` is an
+  unknown tool, and in live or dry-run mode `evaluate_payment` is.
+- Every reply begins with the mode and whether anything can be broadcast, for
+  example `[mode: evaluate-only; broadcast: false]`, so the guarantee is part of the
+  interface.
+- An ALLOW in evaluate-only mode is recorded and counts toward `max_payments`, like
+  any other ALLOW. An operator who means to settle under a capability later does
+  not issue an allowed evaluation under it first.
+- Checkpoints work in every mode; the checkpoint key can only publish checkpoints
+  (§5).
+
 ## 7. Out of scope
 
 Multi-capability policies, delegation chains (a later milestone), Circle Wallets
@@ -233,6 +265,11 @@ Each fails when the control it names is reverted:
 8. Startup refuses a missing or malformed capability, unknown fields, a mainnet
    capability without explicit keys, and a checkpoint key equal to the payment
    key.
+9. Evaluate-only (§6a): startup refuses `-key` and `-dry-run` with
+   `-evaluate-only`; the server offers `evaluate_payment` and never
+   `authorize_payment`, and the live server the reverse; an evaluate-only ALLOW
+   never reaches a settler, even one that is present, and is counted; every
+   reply begins with the mode and broadcast line.
 
 Followed by an adversarial review in a fresh context before any of it is
 published.

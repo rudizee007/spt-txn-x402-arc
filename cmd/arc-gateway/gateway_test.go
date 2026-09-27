@@ -72,7 +72,8 @@ func realEnforcer(t *testing.T, cp capability, used *int, now func() time.Time) 
 
 func newTestServer(enf authorizer, settle settleFunc, used *int) *server {
 	return &server{
-		cap: testCap, enf: enf, settle: settle,
+		mode: modeLive,
+		cap:  testCap, enf: enf, settle: settle,
 		persist: func() error { return nil },
 		now:     func() time.Time { return t0 }, used: used,
 		out: io.Discard, diag: io.Discard,
@@ -84,7 +85,7 @@ func call(s *server, to, amount, resource string) (string, bool) {
 	if amount != "" {
 		args["amount_usdc"] = json.Number(amount)
 	}
-	params, _ := json.Marshal(map[string]interface{}{"name": "authorize_payment", "arguments": args})
+	params, _ := json.Marshal(map[string]interface{}{"name": s.toolName(), "arguments": args})
 	res := s.toolsCall(context.Background(), params).(map[string]interface{})
 	text := res["content"].([]interface{})[0].(map[string]interface{})["text"].(string)
 	return text, res["isError"].(bool)
