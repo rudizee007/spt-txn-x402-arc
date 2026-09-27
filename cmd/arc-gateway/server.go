@@ -42,7 +42,16 @@ type authorizer interface {
 // settleFunc pays an authorized payment. In production it is arcpay.Settle.
 type settleFunc func(context.Context, arcpay.Payment) (arcpay.Result, error)
 
+// Modes (SPEC-ARC-GATE §6a). Fixed at startup; the tool an agent sees and the
+// first line of every reply follow from it.
+const (
+	modeLive     = "live"
+	modeDryRun   = "dry-run"
+	modeEvaluate = "evaluate-only"
+)
+
 type server struct {
+	mode    string // modeLive, modeDryRun or modeEvaluate
 	cap     capability
 	enf     authorizer
 	settle  settleFunc
@@ -158,16 +167,77 @@ func (s *server) handle(ctx context.Context, req rpcReq) {
 	}
 }
 
+// toolName is the one tool this server offers: evaluate_payment in
+// evaluate-only mode, authorize_payment in live and dry-run mode. The two never
+// coexist, and a server in any other mode offers no tool at all.
+func (s *server) toolName() string {
+	switch s.mode {
+	case modeEvaluate:
+		return "evaluate_payment"
+	case modeLive, modeDryRun:
+		return "authorize_payment"
+	}
+	return ""
+}
+
+// payments states what an ALLOW does to a payment in this mode.
+func (s *server) payments() string {
+	switch s.mode {
+	case modeLive:
+		return "settled on ALLOW"
+	case modeDryRun:
+		return "guard only, nothing signed"
+	}
+	return "no payment key, none can be sent"
+}
+
+// checkpoints states whether log checkpoints are published. They are the only
+// transactions a dry-run or evaluate-only server sends; they carry no value and
+// are signed with their own key, which pays their gas.
+func (s *server) checkpoints() string {
+	if s.onEntry != nil {
+		return "on, from a separate gas-only key"
+	}
+	return "off"
+}
+
+func (s *server) toolDescription() string {
+	policy := "It is allowed only if it matches the one capability a human approved: recipient, " +
+		"resource, a maximum amount and an expiry. Every decision, allowed or refused, is recorded " +
+		"in a signed transparency log whose head is checkpointed on Arc."
+	switch s.mode {
+	case modeEvaluate:
+		return "Ask the SPT-Txn enforcement point whether a proposed USDC payment on Arc would be " +
+			"allowed, and why. Evaluate-only: this server holds NO payment key and cannot sign or " +
+			"send any payment, so calling this tool cannot make a payment. The only transactions it " +
+			"sends are log checkpoints, which carry no value and are paid for by a separate key " +
+			"that holds only gas. " + policy
+	case modeDryRun:
+		return "Ask the SPT-Txn enforcement point to authorize a USDC payment on Arc. DRY RUN: on " +
+			"ALLOW the pre-sign guard runs but no payment is signed or sent; log checkpoints are " +
+			"still published from a separate gas-only key. " + policy
+	}
+	return "Ask the SPT-Txn enforcement point to authorize and settle a USDC payment on Arc. The " +
+		"agent holds no keys; on ALLOW the enforcement point settles REAL USDC through a pre-sign " +
+		"guard and returns the transaction link. " + policy
+}
+
+// reply is a tool result whose first line states the mode, so what the server
+// can do is part of every answer, not something an operator has to vouch for.
+func (s *server) reply(text string, isError bool) interface{} {
+	return toolText(fmt.Sprintf("[mode: %s; payments: %s; checkpoints: %s]\n%s",
+		s.mode, s.payments(), s.checkpoints(), text), isError)
+}
+
 func (s *server) toolsList() interface{} {
+	if s.toolName() == "" {
+		return map[string]interface{}{"tools": []interface{}{}}
+	}
 	return map[string]interface{}{
 		"tools": []interface{}{
 			map[string]interface{}{
-				"name": "authorize_payment",
-				"description": "Ask the SPT-Txn enforcement point to authorize and settle a USDC payment on Arc. " +
-					"It is allowed only if it matches the one capability a human approved: recipient, " +
-					"resource, a maximum amount and an expiry. The agent holds no keys; on ALLOW the " +
-					"enforcement point settles through a pre-sign guard and returns the transaction link. " +
-					"Every decision, allowed or refused, is recorded in a signed transparency log.",
+				"name":        s.toolName(),
+				"description": s.toolDescription(),
 				"inputSchema": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -215,25 +285,28 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 	dec := json.NewDecoder(bytes.NewReader(params))
 	dec.UseNumber()
 	if err := dec.Decode(&p); err != nil {
-		return toolText("invalid tool arguments", true)
+		return s.reply("invalid tool arguments", true)
 	}
-	if p.Name != "authorize_payment" {
-		return toolText("unknown tool: "+p.Name, true)
+	if s.toolName() == "" {
+		return s.reply("DENY_UNAVAILABLE: this server has no valid mode and refuses every call", true)
+	}
+	if p.Name != s.toolName() {
+		return s.reply("unknown tool: "+p.Name, true)
 	}
 	if p.Arguments.AmountUSDC == nil {
-		return toolText("DENY_VIOLATION: amount_usdc is required; an omitted amount is not a zero amount", true)
+		return s.reply("DENY_VIOLATION: amount_usdc is required; an omitted amount is not a zero amount", true)
 	}
 	micro, err := amount.ParseMicro(string(*p.Arguments.AmountUSDC))
 	if err != nil {
-		return toolText("DENY_VIOLATION: "+err.Error(), true)
+		return s.reply("DENY_VIOLATION: "+err.Error(), true)
 	}
 	to, err := s.resolveTo(p.Arguments.To)
 	if err != nil {
-		return toolText("DENY_VIOLATION: recipient: "+err.Error(), true)
+		return s.reply("DENY_VIOLATION: recipient: "+err.Error(), true)
 	}
 	var nonce [32]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
-		return toolText("DENY_UNAVAILABLE: unable to generate a single-use nonce", true)
+		return s.reply("DENY_UNAVAILABLE: unable to generate a single-use nonce", true)
 	}
 	// I5: a call's expiry never exceeds the capability's.
 	expiry := s.now().Add(time.Minute)
@@ -265,12 +338,22 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 	// spent, so the agent needs a fresh call, not a retry.
 	if err := s.persist(); err != nil {
 		_, _ = fmt.Fprintf(s.diag, "EVIDENCE FAILURE: decision not persisted: %v\n", err)
-		return toolText("DENY_UNAVAILABLE: the decision could not be persisted, so nothing was settled", true)
+		return s.reply("DENY_UNAVAILABLE: the decision could not be persisted, so nothing was settled", true)
 	}
 	if !r.Allowed() {
-		return toolText(fmt.Sprintf("REFUSED by the SPT-Txn enforcement point (%s): %s. Nothing was signed. Log entry %s.",
+		return s.reply(fmt.Sprintf("REFUSED by the SPT-Txn enforcement point (%s): %s. Nothing was signed. Log entry %s.",
 			r.Class, r.Reason, orNone(r.LogEntry)), true)
 	}
+	// §6a: in evaluate-only mode the decision is the answer, even if a settler
+	// were somehow present.
+	if s.mode == modeEvaluate {
+		return s.reply(fmt.Sprintf("ALLOWED by the SPT-Txn enforcement point (log entry %s). "+
+			"Evaluate-only: this server holds no payment key; nothing was signed or sent.", r.LogEntry), false)
+	}
+	if s.settle == nil {
+		return s.reply(fmt.Sprintf("AUTHORIZED (log entry %s), but this server has no settler; nothing was signed or sent.", r.LogEntry), true)
+	}
+
 	// I1: every field below comes from the authorized call, except Recipient,
 	// the approved address, which the settler proves the call names.
 	res, err := s.settle(ctx, arcpay.Payment{
@@ -283,13 +366,13 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(s.diag, "settlement after ALLOW %s failed: %v\n", r.LogEntry, err)
-		return toolText(fmt.Sprintf("AUTHORIZED (log entry %s), but settlement did not complete: %s",
+		return s.reply(fmt.Sprintf("AUTHORIZED (log entry %s), but settlement did not complete: %s",
 			r.LogEntry, firstLine(err.Error())), true)
 	}
 	if res.TxHash == (common.Hash{}) {
-		return toolText(fmt.Sprintf("AUTHORIZED (log entry %s). DRY RUN: the pre-sign guard passed; nothing was signed or sent.", r.LogEntry), false)
+		return s.reply(fmt.Sprintf("AUTHORIZED (log entry %s). DRY RUN: the pre-sign guard passed; nothing was signed or sent.", r.LogEntry), false)
 	}
-	return toolText(fmt.Sprintf("AUTHORIZED by the SPT-Txn enforcement point and settled on Arc %s through the pre-sign guard.\n"+
+	return s.reply(fmt.Sprintf("AUTHORIZED by the SPT-Txn enforcement point and settled on Arc %s through the pre-sign guard.\n"+
 		"  log entry: %s\n  tx: %s%s (block %d)",
 		s.cap.Net.Name, r.LogEntry, s.cap.Net.ExplorerTxPrefix, res.TxHash.Hex(), res.Block), false)
 }

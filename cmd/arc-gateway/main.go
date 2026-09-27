@@ -56,10 +56,15 @@ func main() {
 	cpEvery := flag.Int("checkpoint-every", 10, "publish the log head on Arc after this many new decisions")
 	maxFee := flag.Uint64("max-fee", 50_000, "ceiling on each payment's total fee, micro-USDC")
 	dryRun := flag.Bool("dry-run", false, "run the guard but never sign or broadcast a payment")
+	evaluateOnly := flag.Bool("evaluate-only", false, "hold no payment key; offer evaluate_payment, which returns the decision and can never settle (refuses -key and -dry-run)")
 	verifyRPC := flag.String("verify-rpc", "", "optional second, independent endpoint; the payer's nonce must agree on both (recommended on mainnet)")
 	flag.Parse()
 
-	for name, v := range map[string]string{"capability": *capPath, "rpc": *rpcURL, "key": *keyPath,
+	mode, err := resolveMode(*evaluateOnly, *dryRun, *keyPath, flag.Args())
+	if err != nil {
+		fatal(err)
+	}
+	for name, v := range map[string]string{"capability": *capPath, "rpc": *rpcURL,
 		"log-key": *logKeyPath, "log": *logPath, "checkpoint-key": *cpKeyPath} {
 		if v == "" {
 			fatal(fmt.Errorf("%w: -%s is required and has no default", arcpay.ErrUnavailable, name))
@@ -73,11 +78,21 @@ func main() {
 	if err != nil {
 		fatal(fmt.Errorf("%w: %w", arcpay.ErrViolation, err))
 	}
-	payKey, cpKey, err := loadKeys(*keyPath, *cpKeyPath)
+	// In evaluate-only mode no payment key is read at all (§6a).
+	var payKey, cpKey *ecdsa.PrivateKey
+	if mode == modeEvaluate {
+		cpKey, err = arcpay.LoadKey(*cpKeyPath)
+	} else {
+		payKey, cpKey, err = loadKeys(*keyPath, *cpKeyPath)
+	}
 	if err != nil {
 		fatal(err)
 	}
-	payAddr, cpAddr := crypto.PubkeyToAddress(payKey.PublicKey), crypto.PubkeyToAddress(cpKey.PublicKey)
+	cpAddr := crypto.PubkeyToAddress(cpKey.PublicKey)
+	payer := "none (evaluate-only: no payment key)"
+	if payKey != nil {
+		payer = crypto.PubkeyToAddress(payKey.PublicKey).Hex()
+	}
 	logKey, err := loadEd25519(*logKeyPath)
 	if err != nil {
 		fatal(err)
@@ -125,27 +140,31 @@ func main() {
 		Logf:  func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
 	}
 
-	cfg := arcpay.Config{Net: cap.Net, Client: client, Key: payKey, MaxFeeMicro: *maxFee, Log: os.Stderr}
-	if *verifyRPC != "" {
-		vc, err := ethclient.DialContext(ctx, *verifyRPC)
-		if err != nil {
-			fatal(fmt.Errorf("%w: dial %s: %w", arcpay.ErrUnavailable, *verifyRPC, err))
+	// settle stays nil in evaluate-only mode: there is nothing to settle with.
+	var settle settleFunc
+	if mode != modeEvaluate {
+		cfg := arcpay.Config{Net: cap.Net, Client: client, Key: payKey, MaxFeeMicro: *maxFee, Log: os.Stderr}
+		if *verifyRPC != "" {
+			vc, err := ethclient.DialContext(ctx, *verifyRPC)
+			if err != nil {
+				fatal(fmt.Errorf("%w: dial %s: %w", arcpay.ErrUnavailable, *verifyRPC, err))
+			}
+			defer vc.Close()
+			vid, err := vc.ChainID(ctx)
+			if err != nil {
+				fatal(fmt.Errorf("%w: eth_chainId on %s: %w", arcpay.ErrUnavailable, *verifyRPC, err))
+			}
+			if err := arcpay.CheckEndpointChain(cap.Net, vid); err != nil {
+				fatal(fmt.Errorf("%w: -verify-rpc: %w", arcpay.ErrViolation, err))
+			}
+			cfg.NonceCheck = vc
 		}
-		defer vc.Close()
-		vid, err := vc.ChainID(ctx)
-		if err != nil {
-			fatal(fmt.Errorf("%w: eth_chainId on %s: %w", arcpay.ErrUnavailable, *verifyRPC, err))
+		settle = func(ctx context.Context, p arcpay.Payment) (arcpay.Result, error) {
+			return arcpay.SettleWithDemo(ctx, cfg, p, arcpay.Demo{DryRun: *dryRun})
 		}
-		if err := arcpay.CheckEndpointChain(cap.Net, vid); err != nil {
-			fatal(fmt.Errorf("%w: -verify-rpc: %w", arcpay.ErrViolation, err))
+		if !*dryRun {
+			settle = func(ctx context.Context, p arcpay.Payment) (arcpay.Result, error) { return arcpay.Settle(ctx, cfg, p) }
 		}
-		cfg.NonceCheck = vc
-	}
-	settle := func(ctx context.Context, p arcpay.Payment) (arcpay.Result, error) {
-		return arcpay.SettleWithDemo(ctx, cfg, p, arcpay.Demo{DryRun: *dryRun})
-	}
-	if !*dryRun {
-		settle = func(ctx context.Context, p arcpay.Payment) (arcpay.Result, error) { return arcpay.Settle(ctx, cfg, p) }
 	}
 
 	saved := log.Len() // the log was saved by openLog
@@ -158,7 +177,8 @@ func main() {
 		return saveCount(countPath, capDigest, used)
 	}
 	s := &server{
-		cap: cap, enf: enf, settle: settle,
+		mode: mode,
+		cap:  cap, enf: enf, settle: settle,
 		persist: persist,
 		onEntry: cp.maybePublish,
 		now:     time.Now, used: &used,
@@ -169,10 +189,14 @@ func main() {
 	fmt.Fprintf(os.Stderr, "  network:    %s %s\n", cap.Net.Name, cap.Net.CAIP2)
 	fmt.Fprintf(os.Stderr, "  capability: pay <= %s USDC to %s for %q, at most %d payment(s) (%d used), until %s\n",
 		arcpay.USDC(new(big.Int).SetUint64(cap.MaxMicro)), cap.Recipient.Hex(), cap.Resource, cap.MaxPayments, used, cap.ExpiresAt.Format(time.RFC3339))
-	fmt.Fprintf(os.Stderr, "  payer:      %s\n  checkpoints from %s every %d decisions\n", payAddr, cpAddr, *cpEvery)
+	fmt.Fprintf(os.Stderr, "  mode:       %s (tool %s)\n", mode, s.toolName())
+	fmt.Fprintf(os.Stderr, "  payer:      %s\n  checkpoints from %s every %d decisions\n", payer, cpAddr, *cpEvery)
 	fmt.Fprintf(os.Stderr, "  log key:    %s (%d entries loaded)\n", hex.EncodeToString(logKey.Public().(ed25519.PublicKey)), log.Len())
-	if *dryRun {
+	switch mode {
+	case modeDryRun:
 		fmt.Fprintln(os.Stderr, "  DRY RUN: the guard runs, nothing is signed or sent")
+	case modeEvaluate:
+		fmt.Fprintln(os.Stderr, "  EVALUATE-ONLY: no payment key loaded; no payment can be signed or sent (checkpoints only)")
 	}
 	serr := s.serve(ctx, os.Stdin)
 	cp.publishNow() // one more checkpoint of the last saved head
@@ -258,4 +282,27 @@ func distinctKeys(pay, checkpoint common.Address) error {
 		return fmt.Errorf("%w: the checkpoint key is the payment key; they must be different keys", arcpay.ErrViolation)
 	}
 	return nil
+}
+
+// resolveMode fixes the server's mode from its flags (SPEC-ARC-GATE §6a).
+// Evaluate-only refuses a payment key and -dry-run; the other modes require a
+// payment key.
+func resolveMode(evaluateOnly, dryRun bool, keyPath string, extra []string) (string, error) {
+	switch {
+	case len(extra) > 0:
+		// flag stops at the first non-flag argument, so every flag after it,
+		// -evaluate-only included, would be silently ignored.
+		return "", fmt.Errorf("%w: unexpected argument %q; every flag after it would be ignored", arcpay.ErrViolation, extra[0])
+	case evaluateOnly && keyPath != "":
+		return "", fmt.Errorf("%w: -evaluate-only holds no payment key; remove -key", arcpay.ErrViolation)
+	case evaluateOnly && dryRun:
+		return "", fmt.Errorf("%w: -evaluate-only and -dry-run are different modes; choose one", arcpay.ErrViolation)
+	case evaluateOnly:
+		return modeEvaluate, nil
+	case keyPath == "":
+		return "", fmt.Errorf("%w: -key is required unless -evaluate-only", arcpay.ErrUnavailable)
+	case dryRun:
+		return modeDryRun, nil
+	}
+	return modeLive, nil
 }
