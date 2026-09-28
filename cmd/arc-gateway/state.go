@@ -28,6 +28,26 @@ import (
 // stateDirRequired is the refusal for a missing or empty -state-dir.
 const stateDirRequired = "-state-dir is required and has no default; on Linux use /var/lib/spt-txn-arc/state (RUNBOOK-ARC.md, install layout)"
 
+// checkPathFlags refuses a -log or -state-dir that is empty or whitespace
+// (before cleaning, which would turn it into "."), that is not absolute, or a
+// -state-dir that is the root directory (SPEC-ARC-GATE §6). main calls it while
+// validating flags, and openLogState calls it again.
+func checkPathFlags(logPath, stateDir string) error {
+	if strings.TrimSpace(logPath) == "" {
+		return fmt.Errorf("%w: -log is required and has no default", arcpay.ErrUnavailable)
+	}
+	if strings.TrimSpace(stateDir) == "" {
+		return fmt.Errorf("%w: %s", arcpay.ErrUnavailable, stateDirRequired)
+	}
+	if !filepath.IsAbs(logPath) || !filepath.IsAbs(stateDir) {
+		return fmt.Errorf("%w: -log and -state-dir must be absolute paths", arcpay.ErrViolation)
+	}
+	if filepath.Clean(stateDir) == string(filepath.Separator) {
+		return fmt.Errorf("%w: -state-dir must not be the root directory", arcpay.ErrViolation)
+	}
+	return nil
+}
+
 // logState is what the gateway holds while it runs (SPEC-ARC-GATE §3, §6): a
 // lock on its log, a lock on its capability, the log, the payment count for the
 // capability, and the size of the last head recorded as on chain.
@@ -49,12 +69,8 @@ type logState struct {
 // keyed by the capability's digest in one state directory, so every gateway on
 // this capability, whatever its log path, meets the same lock and count.
 func openLogState(logPath, stateDir string, pub ed25519.PublicKey, capDigest [32]byte) (*logState, error) {
-	// An empty path is refused before cleaning, which would turn it into ".".
-	if strings.TrimSpace(logPath) == "" {
-		return nil, fmt.Errorf("%w: -log is required and has no default", arcpay.ErrUnavailable)
-	}
-	if strings.TrimSpace(stateDir) == "" {
-		return nil, fmt.Errorf("%w: %s", arcpay.ErrUnavailable, stateDirRequired)
+	if err := checkPathFlags(logPath, stateDir); err != nil {
+		return nil, err
 	}
 	// Every file is opened through the cleaned paths that were checked.
 	logPath, stateDir = filepath.Clean(logPath), filepath.Clean(stateDir)
@@ -89,7 +105,7 @@ func openLogState(logPath, stateDir string, pub ed25519.PublicKey, capDigest [32
 		return fail(fmt.Errorf("%w: %w", arcpay.ErrViolation, err))
 	}
 	// The count is also kept beside the log, per capability, so a gateway on
-	// the same log whose default state directory differs still sees it. An
+	// the same log with a different -state-dir still sees it. An
 	// unkeyed <log>.count from an earlier version is read and never written.
 	// The highest is used; the two keyed copies are written.
 	besidePath := logPath + "." + id + ".count"

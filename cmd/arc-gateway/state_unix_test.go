@@ -4,7 +4,6 @@ package main
 
 import (
 	"crypto/ed25519"
-	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -280,8 +279,10 @@ func TestEmptyStateOrLogPathIsRefused(t *testing.T) {
 			t.Fatalf("empty -state-dir %q: %v", empty, err)
 		}
 	}
-	if _, err := openLogState("", testState(t), pub, [32]byte{1}); !errors.Is(err, arcpay.ErrUnavailable) {
-		t.Fatalf("empty -log: %v", err)
+	for _, empty := range []string{"", "  ", "\t"} {
+		if _, err := openLogState(empty, testState(t), pub, [32]byte{1}); !errors.Is(err, arcpay.ErrUnavailable) {
+			t.Fatalf("empty -log %q: %v", empty, err)
+		}
 	}
 	if entries, _ := os.ReadDir(cwd); len(entries) != 0 {
 		t.Fatalf("files created in the working directory: %v", entries)
@@ -304,40 +305,30 @@ func TestGroupWritableAncestorIsRefused(t *testing.T) {
 	}
 }
 
-// §6: relative paths are checked where they resolve, against the working
-// directory, and the files are created there.
-func TestRelativePathsAreCheckedWhereTheyResolve(t *testing.T) {
-	base := tempDir(t)
-	mkdirMode(t, filepath.Join(base, "logs"), 0o700)
-	t.Chdir(base)
-	st, err := openLogState(filepath.Join("logs", "decisions.json"), "state", newPub(t), [32]byte{1})
-	if err != nil {
-		t.Fatalf("relative paths under a private directory: %v", err)
-	}
-	_ = st.close()
-	id := hex.EncodeToString(bytes32(1))
-	for _, f := range []string{
-		filepath.Join(base, "logs", "decisions.json"),
-		filepath.Join(base, "logs", "decisions.json.lock"),
-		filepath.Join(base, "logs", "decisions.json."+id+".count"),
-		filepath.Join(base, "state", id+".lock"),
-		filepath.Join(base, "state", id+".count"),
+// §6: -log and -state-dir must be absolute; a relative one is refused before
+// anything is created, and so is -state-dir set to the root directory.
+func TestRelativeOrRootPathsAreRefused(t *testing.T) {
+	cwd := tempDir(t)
+	t.Chdir(cwd)
+	abs, pub := stateDir(t)
+	for _, c := range []struct{ log, state string }{
+		{"decisions.json", testState(t)},
+		{filepath.Join("logs", "decisions.json"), testState(t)},
+		{filepath.Join("..", "decisions.json"), testState(t)},
+		{"./decisions.json", testState(t)},
+		{abs, "state"},
+		{abs, "../state"},
 	} {
-		if _, err := os.Stat(f); err != nil {
-			t.Fatalf("expected %s: %v", f, err)
+		if _, err := openLogState(c.log, c.state, pub, [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "must be absolute paths") {
+			t.Fatalf("relative -log %q / -state-dir %q: %v", c.log, c.state, err)
 		}
 	}
-	entries, _ := os.ReadDir(base)
-	for _, e := range entries {
-		if e.Name() != "logs" && e.Name() != "state" {
-			t.Fatalf("unexpected file in the working directory: %s", e.Name())
+	for _, root := range []string{"/", "//", "/./"} {
+		if _, err := openLogState(abs, root, pub, [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "root directory") {
+			t.Fatalf("-state-dir %q: %v", root, err)
 		}
 	}
-
-	shared := mkdirMode(t, filepath.Join(base, "shared"), 0o770)
-	mkdirMode(t, filepath.Join(shared, "logs"), 0o700)
-	t.Chdir(shared)
-	if _, err := openLogState(filepath.Join("logs", "decisions.json"), filepath.Join(base, "state2"), newPub(t), [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "not sticky") {
-		t.Fatalf("relative log below a group-writable working directory: %v", err)
+	if entries, _ := os.ReadDir(cwd); len(entries) != 0 {
+		t.Fatalf("files created in the working directory: %v", entries)
 	}
 }

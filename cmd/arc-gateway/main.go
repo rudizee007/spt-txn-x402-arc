@@ -9,9 +9,15 @@
 // Register it with an MCP client, for example:
 //
 //	{ "mcpServers": { "spt-txn-arc": { "command": "/path/to/arc-gateway",
-//	    "args": ["-capability", "cap.json", "-rpc", "https://rpc.testnet.arc.io",
-//	             "-key", "pay.key", "-log-key", "log.key", "-log", "decisions.json",
-//	             "-checkpoint-key", "checkpoint.key"] } } }
+//	    "args": ["-capability", "/etc/spt-txn-arc/capability.json",
+//	             "-rpc", "https://rpc.testnet.arc.io",
+//	             "-key", "/etc/spt-txn-arc/pay.key",
+//	             "-log-key", "/etc/spt-txn-arc/log.key",
+//	             "-checkpoint-key", "/etc/spt-txn-arc/checkpoint.key",
+//	             "-log", "/var/lib/spt-txn-arc/decisions.json",
+//	             "-state-dir", "/var/lib/spt-txn-arc/state"] } } }
+//
+// -log and -state-dir are required and must be absolute paths.
 //
 // Build with CGO_ENABLED=0 go build -tags arc ./cmd/arc-gateway (see nocgo.go).
 // Diagnostics go to stderr; stdout carries only the MCP protocol.
@@ -71,8 +77,8 @@ func main() {
 			fatal(fmt.Errorf("%w: -%s is required and has no default", arcpay.ErrUnavailable, name))
 		}
 	}
-	if strings.TrimSpace(*stateDir) == "" {
-		fatal(fmt.Errorf("%w: %s", arcpay.ErrUnavailable, stateDirRequired))
+	if err := checkPathFlags(*logPath, *stateDir); err != nil {
+		fatal(err)
 	}
 	if *cpEvery < 1 {
 		fatal(fmt.Errorf("%w: -checkpoint-every must be at least 1", arcpay.ErrViolation))

@@ -272,51 +272,44 @@ in `docs/SPEC-ARC-GATE.md` §6; this layout meets them on stock Linux and RHEL.
 ```text
 Signed log, counts, checkpoint:  /var/lib/spt-txn-arc/          service user, 0700
 -state-dir:                      /var/lib/spt-txn-arc/state/    service user, 0700
-Keys and approval file:          /etc/spt-txn-arc/              root:spt-arc 0750, keys 0400 or 0600
+Keys and approval file:          /etc/spt-txn-arc/              root:spt-arc 0750
+                                 key files owned by spt-arc, 0400 or 0600
 Diagnostics:                     stderr → journald
 ```
 
+- **Key files are owned by the service user** (`spt-arc`) with mode 0400 or 0600.
+  The key check refuses any group or other permission, so a key readable only
+  through the group (`root:spt-arc 0440`) is refused, and a key owned by root
+  with mode 0400 cannot be read by the service.
 - **Not `/var/log`.** The signed log is state, not a text log: log rotation would
   rename or truncate it and break its signatures and its match with the on-chain
   checkpoints, and on some distributions `/var/log` is group-writable, which the
   gateway refuses.
 - **Not `DynamicUser=`.** It makes `/var/lib/<name>` a symlink, which the gateway
   refuses. Use a fixed service user.
-- **`-log` and `-state-dir` are required** and have no default.
+- **`-log` and `-state-dir` are required, have no default, and must be absolute
+  paths.**
 - **OpenBSD:** a dedicated `/var/<daemon>` directory owned by the service user,
   mode 0700, not a group-shared 770 directory.
 
-`arc-gateway` speaks MCP over stdin and stdout, so under systemd it is started per
-client connection by socket activation. A minimal sketch:
+**How it runs.** `arc-gateway` is an MCP server over stdin and stdout, started as a
+subprocess by the MCP host (the agent runtime), once per host session. It is not a
+network daemon and is not started per connection. Run the MCP host as the service
+user, and the gateway inherits that account. When the host itself runs under
+systemd or in a container, give the host process:
 
-```ini
-# /etc/systemd/system/arc-gateway.socket
-[Socket]
-ListenStream=/run/spt-txn-arc/mcp.sock
-SocketUser=spt-arc
-SocketMode=0600
-Accept=yes
+- `User=spt-arc` (a fixed account, not `DynamicUser=`)
+- `StateDirectory=spt-txn-arc` and `StateDirectoryMode=0700`
+- `ProtectSystem=strict` and `ReadWritePaths=/var/lib/spt-txn-arc`
+- `NoNewPrivileges=yes` and `PrivateTmp=yes`
 
-[Install]
-WantedBy=sockets.target
-```
+and register the gateway with the host using absolute paths, for example:
 
-```ini
-# /etc/systemd/system/arc-gateway@.service
-[Service]
-User=spt-arc
-StateDirectory=spt-txn-arc
-StateDirectoryMode=0700
-StandardInput=socket
-StandardOutput=socket
-StandardError=journal
-ProtectSystem=strict
-ReadWritePaths=/var/lib/spt-txn-arc
-NoNewPrivileges=yes
-PrivateTmp=yes
-ExecStart=/usr/local/bin/arc-gateway \
+```text
+/usr/local/bin/arc-gateway \
   -capability /etc/spt-txn-arc/capability.json \
   -rpc https://rpc.mainnet.arc.io \
+  -verify-rpc <a second, independent Arc endpoint> \
   -key /etc/spt-txn-arc/pay.key \
   -checkpoint-key /etc/spt-txn-arc/checkpoint.key \
   -log-key /etc/spt-txn-arc/log.key \
@@ -324,5 +317,5 @@ ExecStart=/usr/local/bin/arc-gateway \
   -state-dir /var/lib/spt-txn-arc/state
 ```
 
-One connection is served at a time per capability: a second connection's instance
-finds the log and capability locks held and exits with a refusal.
+Only one gateway runs per capability at a time: a second one finds the log and
+capability locks held and exits with a refusal.

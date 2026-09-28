@@ -250,8 +250,9 @@ owned by the operator account or root and must not be writable by group or
 others unless its sticky bit is set (for example a real, sticky world-writable
 `/tmp` directory; on macOS `/tmp` is a symlink and is refused). No component of
 either path may be a symlink, and `-log` itself may not be one; they are not
-resolved: name the real path. A relative path is resolved against the process's
-working directory, then cleaned and walked, so a `..` is removed before anything
+resolved: name the real path. `-log` and `-state-dir` must be absolute paths; a
+relative one is refused, and so is a `-state-dir` that is the root directory.
+Paths are cleaned before they are walked, so a `..` is removed before anything
 is opened. The checks use the owner uid and the mode bits only; an access
 control list that grants another account write access (for example one inherited
 on macOS) is not detected and is not supported. Network and shared file systems
