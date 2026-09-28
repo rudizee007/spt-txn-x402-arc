@@ -45,6 +45,9 @@ type logState struct {
 // keyed by the capability's digest in one state directory, so every gateway on
 // this capability, whatever its log path, meets the same lock and count.
 func openLogState(logPath, stateDir string, pub ed25519.PublicKey, capDigest [32]byte) (*logState, error) {
+	if err := checkLogPath(logPath); err != nil {
+		return nil, err
+	}
 	lock, err := lockFile(logPath+".lock", "log "+logPath)
 	if err != nil {
 		return nil, err
@@ -138,9 +141,34 @@ func stillHeld(f *os.File) error {
 	return nil
 }
 
+// checkLogPath refuses a -log that is a symlink or sits in a symlinked
+// directory, and a log directory that is not owner-only (SPEC-ARC-GATE §6). The
+// lock, the count copy and the checkpoint record live beside the log, so this
+// one check covers them. Symlinks are refused, not resolved: the operator names
+// the real file.
+func checkLogPath(logPath string) error {
+	p := filepath.Clean(logPath)
+	dir := filepath.Dir(p)
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("%w: log directory %s: %w", arcpay.ErrUnavailable, dir, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: log directory %s is a symlink; name the real directory in -log", arcpay.ErrViolation, dir)
+	}
+	fi, err = os.Lstat(p)
+	switch {
+	case err == nil && fi.Mode()&os.ModeSymlink != 0:
+		return fmt.Errorf("%w: -log %s is a symlink; name the real file", arcpay.ErrViolation, p)
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("%w: log %s: %w", arcpay.ErrUnavailable, p, err)
+	}
+	return arcpay.CheckOwnerOnlyDir(dir)
+}
+
 // checkStateDir creates the state directory if needed and refuses one that is
-// not a directory or that others can write to: whoever can replace a count file
-// can reset it.
+// not a directory, that others can write to, or that another user owns: whoever
+// can replace a count file can reset it.
 func checkStateDir(dir string) error {
 	if dir == "" {
 		return fmt.Errorf("%w: no state directory", arcpay.ErrUnavailable)
@@ -148,14 +176,7 @@ func checkStateDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("%w: create state directory %s: %w", arcpay.ErrUnavailable, dir, err)
 	}
-	fi, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("%w: state directory %s: %w", arcpay.ErrUnavailable, dir, err)
-	}
-	if !fi.IsDir() || fi.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%w: state directory %s must be a directory that only its owner can write", arcpay.ErrViolation, dir)
-	}
-	return nil
+	return arcpay.CheckOwnerOnlyDir(dir)
 }
 
 // checkpointer builds the log's checkpointer from this state, so it starts

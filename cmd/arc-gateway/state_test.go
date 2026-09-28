@@ -743,16 +743,65 @@ func TestUnseenCheckpointIsSentAgainAfterTimeout(t *testing.T) {
 	cp.now = func() time.Time { return start }
 	_ = cp.publish(1500*time.Millisecond, false)
 	cp.now = func() time.Time { return start.Add(pendingTimeout + time.Minute) }
-	cp.maybePublish()
-	if cp.pending != nil {
-		t.Fatal("pending checkpoint kept past the timeout")
+	cp.maybePublish() // drops the unseen checkpoint; the interval has passed too, so it resends
+	if len(fake.Broadcasts()) != 2 {
+		t.Fatalf("head not sent again after the timeout: %d broadcasts", len(fake.Broadcasts()))
 	}
 	if n, _ := loadCheckpointHead(cp.headPath, l); n != 0 {
 		t.Fatalf("an unseen checkpoint was recorded: %d", n)
 	}
-	cp.last = time.Time{}
-	_ = cp.publish(1500*time.Millisecond, false)
+}
+
+// One clock: the minimum interval and the pending timeout both run on c.now.
+// The frozen time is a day from the wall clock, so either wall-clock use fails.
+func TestCheckpointerUsesOneClock(t *testing.T) {
+	fake, cp, l, priv := checkpointFixture(t)
+	start := time.Now().Add(-24 * time.Hour)
+	now := start
+	cp.now = func() time.Time { return now }
+	appendSaved := func(b byte) {
+		t.Helper()
+		if _, err := l.Append(priv, translog.Allow, [32]byte{b}, time.Now().Unix()); err != nil {
+			t.Fatal(err)
+		}
+		n := l.Len()
+		cp.savedSize = func() int { return n }
+	}
+
+	cp.maybePublish()
+	if len(fake.Broadcasts()) != 1 {
+		t.Fatalf("first checkpoint: %d broadcasts", len(fake.Broadcasts()))
+	}
+	appendSaved(10)
+	now = start.Add(checkpointMinInterval - time.Second)
+	cp.maybePublish()
+	if len(fake.Broadcasts()) != 1 {
+		t.Fatalf("sent inside the minimum interval: %d broadcasts", len(fake.Broadcasts()))
+	}
+	now = start.Add(checkpointMinInterval + time.Second)
+	cp.maybePublish()
 	if len(fake.Broadcasts()) != 2 {
+		t.Fatalf("not sent once the interval passed: %d broadcasts", len(fake.Broadcasts()))
+	}
+
+	// Unseen for longer than pendingTimeout: dropped, unrecorded, eligible again.
+	fake.Set(func(f *arcpaytest.Fake) { f.NoReceipt = true })
+	sent := now
+	now = sent.Add(pendingTimeout - time.Second)
+	cp.confirm(context.Background(), false)
+	if cp.pending == nil {
+		t.Fatal("pending dropped before the timeout")
+	}
+	now = sent.Add(pendingTimeout + time.Second)
+	cp.confirm(context.Background(), false)
+	if cp.pending != nil {
+		t.Fatal("pending kept past the timeout")
+	}
+	if root, n := l.Head(); n == cp.published {
+		t.Fatalf("head %x of %d entries still counted as published after the timeout", root, n)
+	}
+	cp.maybePublish()
+	if len(fake.Broadcasts()) != 3 {
 		t.Fatalf("head not sent again after the timeout: %d broadcasts", len(fake.Broadcasts()))
 	}
 }

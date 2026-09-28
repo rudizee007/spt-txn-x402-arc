@@ -82,7 +82,7 @@ func (c *checkpointer) maybePublish() {
 		cancel()
 	}
 	c.since++
-	if c.since < c.every || time.Since(c.last) < checkpointMinInterval {
+	if c.since < c.every || c.now().Sub(c.last) < checkpointMinInterval {
 		return
 	}
 	if c.publish(30*time.Second, false) == nil {
@@ -125,7 +125,7 @@ func (c *checkpointer) publish(timeout time.Duration, wait bool) error {
 	}
 	c.pending = &pendingHead{n: n, root: root, tx: hash, prev: c.published, sent: c.now()}
 	c.published = n
-	c.last = time.Now()
+	c.last = c.now()
 	_, _ = fmt.Fprintf(c.diag, "checkpoint: %d entries, root %x, tx %s%s\n", n, root, c.net.ExplorerTxPrefix, hash.Hex())
 	if wait {
 		c.confirm(ctx, true)

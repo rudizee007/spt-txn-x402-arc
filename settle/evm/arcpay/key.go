@@ -44,8 +44,5 @@ func CheckKeyFile(path string) error {
 	if mode := info.Mode().Perm(); mode&0o077 != 0 {
 		return violation(fmt.Errorf("key file %s is mode %04o, group- or world-readable.\n  chmod 600 %s", path, mode, path))
 	}
-	if dir, err := os.Stat(filepath.Dir(path)); err == nil && dir.Mode().Perm()&0o022 != 0 {
-		return violation(fmt.Errorf("directory %s is mode %04o, group- or world-WRITABLE, so the key file can be replaced.\n  chmod 700 %s", filepath.Dir(path), dir.Mode().Perm(), filepath.Dir(path)))
-	}
-	return nil
+	return CheckOwnerOnlyDir(filepath.Dir(path))
 }

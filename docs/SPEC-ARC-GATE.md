@@ -98,15 +98,22 @@ it names. A restart, whoever causes it, resumes it; a different capability file,
 including a reformatted copy of the same one, is a new approval with its own
 count. The count is also written beside the log, per capability
 (`<log>.<digest>.count`), and at startup the higher is used (an unkeyed
-`<log>.count` from an earlier version is read too, and never written), so a gateway on the same log whose default state
-directory differs (the default follows the environment: `HOME`, and on Linux
-`XDG_CONFIG_HOME`) still sees it. Startup prints the state directory in use. A
-gateway started with both a different `-state-dir` and a different `-log`, or
-under another user account, keeps its own count: run every gateway for one
-capability with the same state directory, and name it explicitly when more than
-one host launches the gateway. The asset is always the selected network's USDC; it
-is not configurable. The recipient is carried to the enforcement point in the
-transport form of §A.2 (base58 of the 32-byte widened account id).
+`<log>.count` from an earlier version is read too, and never written), so a
+gateway on the same log whose default state directory differs (the default
+follows the environment: `HOME`, and on Linux `XDG_CONFIG_HOME`) still sees it.
+Startup prints the state directory in use. A gateway started with both a
+different `-state-dir` and a different `-log`, or under another user account,
+keeps its own count: run every gateway for one capability with the same state
+directory, and name it explicitly when more than one host launches the gateway.
+The asset is always the selected network's USDC; it is not configurable. The
+recipient is carried to the enforcement point in the transport form of §A.2
+(base58 of the 32-byte widened account id).
+
+The count in force is the highest of three: the keyed copy in the state
+directory, the keyed copy beside the log, and a legacy unkeyed `<log>.count`. A
+restored higher count is honoured on purpose, even though it can exhaust the
+approval with no matching ALLOWs in this log; a restored lower count is ignored.
+That is conservative against over-spend.
 
 ## 4. Settlement package
 
@@ -170,11 +177,11 @@ leaves that residual, and is not recommended on mainnet.
 **Lifetime of the signed transaction.** A signed artefact should not outlive the
 authorization that produced it. An EIP-1559 transaction carries no expiry field,
 so on Arc its lifetime cannot be derived from the authorization's expiry. What
-bounds it instead: the signed transaction exists only in memory, is broadcast at once, and
-binds a nonce that the payer's next transaction consumes. The residual is stated
-here, not hidden: an endpoint that receives the signed transaction and withholds
-it can submit it later, until that nonce is used. The gateway reports a
-transaction that is broadcast but unconfirmed within its timeout as
+bounds it instead: the signed transaction exists only in memory, is broadcast at
+once, and binds a nonce that the payer's next transaction consumes. The residual
+is stated here, not hidden: an endpoint that receives the signed transaction and
+withholds it can submit it later, until that nonce is used. The gateway reports
+a transaction that is broadcast but unconfirmed within its timeout as
 unavailable, never as success.
 
 ## 5. Log checkpoints on Arc
@@ -234,10 +241,17 @@ held, startup refuses. It also refuses if a lock file's name stops referring to
 the file it locked, and if the state directory is writable by anyone but its
 owner. Before every save of a decision the gateway checks again that both lock
 files are still the files it locked; if either is gone or replaced, nothing is
-saved and nothing is settled. The locks are the operating system's advisory `flock`: it binds every
-gateway on one machine, not processes that ignore it, and it is not reliable on
-a network file system, which is not supported. On a platform without `flock` the
-gateway refuses to start.
+saved and nothing is settled. The log, the counts beside it, the checkpoint
+record, the lock files and the state directory are assumed to be owned by the
+operator account that runs the gateway. `flock` is advisory and is not a control
+between user accounts: what keeps another account out is ownership. The
+directory holding the log and the state directory are refused if group or others
+can write them, or if another user owns them; `-log` is refused if it, or its
+directory, is a symlink (it is not resolved: name the real file). Network and
+shared file systems are not supported. The locks are the operating system's
+advisory `flock`: it binds every gateway on one machine, not processes that
+ignore it, and it is not reliable on a network file system, which is not
+supported. On a platform without `flock` the gateway refuses to start.
 
 **The last checkpoint is remembered.** Once a checkpoint transaction is seen
 mined, its size, root and transaction are saved atomically next to the log
@@ -245,13 +259,12 @@ mined, its size, root and transaction are saved atomically next to the log
 recorded, and the next run publishes that head again; a reverted one is sent
 again. Only one checkpoint is in flight at a time: a newer head waits until the
 pending one is seen mined or reverted, or until it has gone unseen for ten
-minutes, when it is dropped unrecorded and its head is sent again. The pending checkpoint is looked for at
-every decision, after the reply, so the record trails the chain by at most that
-one checkpoint: a gateway killed
-right after sending one leaves it unrecorded. A head already recorded is not
-published again. At startup the gateway
-refuses if the record names more entries than the log holds, or if the log's
-first n entries do not hash to the recorded root.
+minutes, when it is dropped unrecorded and its head is sent again. The pending
+checkpoint is looked for at every decision, after the reply, so the record
+trails the chain by at most that one checkpoint: a gateway killed right after
+sending one leaves it unrecorded. A head already recorded is not published
+again. At startup the gateway refuses if the record names more entries than the
+log holds, or if the log's first n entries do not hash to the recorded root.
 
 The record is a local, unsigned file. It detects a log that diverged from it by
 accident (a restored or truncated log, a copy from another run); it does not
@@ -280,26 +293,24 @@ can probe the policy with no funds at risk, and the refusal it sees is the same
 decision, from the same enforcement point, recorded in the same signed log and
 checkpointed on Arc, as in live mode.
 
-**Rules.**
-- `-evaluate-only` refuses to start if `-key` or `-dry-run` is given. A payment key
-  in this mode is a configuration error, not something to ignore. Startup also
-  refuses any positional argument, because flag parsing stops there and every
-  flag after it, `-evaluate-only` included, would be silently dropped.
-- The two tools never coexist: in evaluate-only mode `authorize_payment` is an
-  unknown tool, and in live or dry-run mode `evaluate_payment` is.
-- Every reply begins with the mode, what an ALLOW does to a payment, and whether
-  log checkpoints are published, for example
-  `[mode: evaluate-only; payments: no payment key, none can be sent; checkpoints: on, from a separate gas-only key]`,
-  so the guarantee is part of the interface. Checkpoints are named because on Arc
-  their gas is paid in USDC: "no transaction is sent" would be false.
-- A server in any other mode offers no tool and refuses every call, so a wiring
-  mistake cannot yield a settling server that describes itself otherwise. A live
-  server with no settler reports an error, never an ALLOW.
-- An ALLOW in evaluate-only mode is recorded and counts toward `max_payments`, like
-  any other ALLOW. An operator who means to settle under a capability later does
-  not issue an allowed evaluation under it first.
-- Checkpoints work in every mode; the checkpoint key can only publish checkpoints
-  (§5).
+**Rules.** - `-evaluate-only` refuses to start if `-key` or `-dry-run` is given.
+A payment key in this mode is a configuration error, not something to ignore.
+Startup also refuses any positional argument, because flag parsing stops there
+and every flag after it, `-evaluate-only` included, would be silently dropped. -
+The two tools never coexist: in evaluate-only mode `authorize_payment` is an
+unknown tool, and in live or dry-run mode `evaluate_payment` is. - Every reply
+begins with the mode, what an ALLOW does to a payment, and whether log
+checkpoints are published, for example `[mode: evaluate-only; payments: no
+payment key, none can be sent; checkpoints: on, from a separate gas-only key]`,
+so the guarantee is part of the interface. Checkpoints are named because on Arc
+their gas is paid in USDC: "no transaction is sent" would be false. - A server
+in any other mode offers no tool and refuses every call, so a wiring mistake
+cannot yield a settling server that describes itself otherwise. A live server
+with no settler reports an error, never an ALLOW. - An ALLOW in evaluate-only
+mode is recorded and counts toward `max_payments`, like any other ALLOW. An
+operator who means to settle under a capability later does not issue an allowed
+evaluation under it first. - Checkpoints work in every mode; the checkpoint key
+can only publish checkpoints (§5).
 
 **Residuals, stated rather than hidden.**
 - In evaluate-only mode there is no payment key to compare with, so startup cannot
