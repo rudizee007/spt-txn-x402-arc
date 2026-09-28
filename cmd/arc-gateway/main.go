@@ -36,7 +36,6 @@ import (
 	"fmt"
 	"math/big"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -211,18 +210,19 @@ func main() {
 // characters, from a file that passes the same permission checks as every
 // other key.
 func loadEd25519(path string) (ed25519.PrivateKey, error) {
-	if err := arcpay.CheckKeyFile(path); err != nil {
+	resolved, err := arcpay.ResolveKeyFile(path)
+	if err != nil {
 		return nil, err
 	}
-	// #nosec G304 -- the operator names the log key file on the command line,
-	// and CheckKeyFile has already refused an exposed or replaceable file.
-	raw, err := os.ReadFile(filepath.Clean(path))
+	// #nosec G304 -- the path ResolveKeyFile walked and checked, from the
+	// operator's command line.
+	raw, err := os.ReadFile(resolved)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read %s: %w", arcpay.ErrUnavailable, path, err)
+		return nil, fmt.Errorf("%w: read %s: %w", arcpay.ErrUnavailable, resolved, err)
 	}
 	seed, err := hex.DecodeString(strings.TrimSpace(string(raw)))
 	if err != nil || len(seed) != ed25519.SeedSize {
-		return nil, fmt.Errorf("%w: %s must hold exactly 64 hex characters (a 32-byte Ed25519 seed)", arcpay.ErrViolation, path)
+		return nil, fmt.Errorf("%w: %s must hold exactly 64 hex characters (a 32-byte Ed25519 seed)", arcpay.ErrViolation, resolved)
 	}
 	return ed25519.NewKeyFromSeed(seed), nil
 }

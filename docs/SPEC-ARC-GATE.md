@@ -263,6 +263,12 @@ state directory, if missing, is created with mode 0700 only after the directory
 above it has passed the walk, and its parent must already exist.
 
 **Design boundaries.** These are decided, not deferred:
+- **One live gateway per approval.** The locks and the counts are local to one
+  machine and one state directory. Two gateway instances that do not share the
+  same state directory on the same machine do not share a counter, and each
+  enforces the approval's `max_payments` on its own. Single instance is the
+  mechanism: an approval is served by exactly one running gateway, and a
+  deployment must guarantee that (see RUNBOOK-ARC.md section G for containers).
 - **Ownership is the control between accounts.** The checks use the owner uid
   and the mode bits only. The gateway's files are assumed to be owned by the
   operator account that runs it; that account also holds the payment key, so
@@ -272,8 +278,9 @@ above it has passed the walk, and its parent must already exist.
   account write access (for example one inherited on macOS) is not detected:
   reading it needs cgo or an external tool, neither of which the trust boundary
   allows.
-- **Network and shared file systems are not supported.** `flock` is advisory
-  and not reliable on them.
+- **Network and shared file systems are not supported, and not detected.**
+  `flock` is advisory and not reliable on them; the checks read owners and
+  modes, not the file-system type, so such a volume can pass them.
 - **A checkpoint not seen mined is sent again.** After a restart, or after ten
   minutes unseen, the same head can be published twice from the checkpoint key.
   A head is only ever sent after it is saved, so this repeats a root and never

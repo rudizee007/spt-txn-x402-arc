@@ -324,5 +324,44 @@ and register the gateway with the host using absolute paths, for example:
   -state-dir /var/lib/spt-txn-arc/state
 ```
 
-Only one gateway runs per capability at a time: a second one finds the log and
-capability locks held and exits with a refusal.
+**One instance per approval.** Exactly one gateway may serve an approval at any
+moment, including during upgrades. On one machine with one state directory this
+is enforced: a second gateway finds the log and capability locks held and exits
+with a refusal. The locks and counts are local to that machine, so two gateways
+on different machines or with different volumes do not see each other, and each
+would enforce the approval on its own; the deployment must prevent that.
+
+**Containers.** A layout that passes the gateway's checks:
+
+- Run as a non-root user (for example uid 10001), with a read-only root file
+  system.
+- Create `/var/lib/spt-txn-arc` in the image, owned by that user, mode 0700. Mount
+  a Docker/Podman named volume there (on first use it takes the image directory's
+  owner and mode), or a block-backed ReadWriteOnce volume on Kubernetes whose
+  directory an init step has given to that user with mode 0700.
+- Put the keys in a directory owned by the container user, mode 0700, with the
+  key files owned by that user, mode 0400 or 0600. A Kubernetes Secret volume
+  cannot be used directly as the key directory: its entries are symlinks into
+  `..data`, its directory mode is not owner-only, and Kubernetes cannot give each
+  file an owner, so the gateway refuses it. Copy the keys from the Secret into
+  such a directory with an init container, or use a baked-in or bind-mounted
+  directory with the same ownership.
+- On Kubernetes, run one replica and never overlap two: `strategy: Recreate` for a
+  Deployment, or a StatefulSet with `replicas: 1` and a ReadWriteOnce volume
+  (`ReadWriteOncePod`, where available, limits the volume to a single pod). A
+  rolling update starts the new pod before the old one stops, which is two
+  instances.
+
+These are refused, by design, with a message naming the directory:
+
+- a Kubernetes `emptyDir` (created mode 0777, no sticky bit);
+- a volume with `fsGroup` set (group-writable, shared with every container in the
+  pod that has that group);
+- a host directory bind-mounted into a rootless or user-namespaced container, when
+  its owner is not mapped and it appears as `nobody` (65534);
+- a Kubernetes Secret volume used as the key directory (see above).
+
+Network and shared volumes (NFS, AWS EFS, Azure Files, CephFS) are not supported
+and are not detected: the gateway checks owners and modes, not the file-system
+type, so such a volume can pass the checks while `flock` on it is not reliable.
+Do not use them for the log or the state directory.

@@ -64,6 +64,13 @@ func resolvePath(dir string, lastIsLeaf bool) (string, error) {
 	if !lastIsLeaf {
 		last = func(d string, fi os.FileInfo) error { return aboveRule(d, d, fi) }
 	}
+	// Every error returns "", never a partly resolved path.
+	done := func(p string, err error) (string, error) {
+		if err != nil {
+			return "", err
+		}
+		return p, nil
+	}
 	abs, err := filepath.Abs(filepath.Clean(dir))
 	if err != nil {
 		return "", unavailable(fmt.Errorf("directory %s: %w", dir, err))
@@ -77,7 +84,7 @@ func resolvePath(dir string, lastIsLeaf bool) (string, error) {
 	}
 	pending := splitPath(abs[len(vol):])
 	if len(pending) == 0 {
-		return root, last(root, fi)
+		return done(root, last(root, fi))
 	}
 	if err := aboveRule(root, abs, fi); err != nil {
 		return "", err
@@ -116,14 +123,14 @@ func resolvePath(dir string, lastIsLeaf bool) (string, error) {
 			return "", violation(fmt.Errorf("%s, on the path to %s, is not a directory", next, abs))
 		}
 		if len(pending) == 0 {
-			return next, last(next, fi)
+			return done(next, last(next, fi))
 		}
 		if err := aboveRule(next, abs, fi); err != nil {
 			return "", err
 		}
 		cur = next
 	}
-	return cur, last(cur, fi)
+	return done(cur, last(cur, fi))
 }
 
 // aboveRule is the rule for a directory above the last one.

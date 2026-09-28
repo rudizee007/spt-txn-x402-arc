@@ -205,7 +205,23 @@ func checkStateDir(dir string) (string, error) {
 	if err := os.Mkdir(target, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return "", fmt.Errorf("%w: create state directory %s: %w", arcpay.ErrUnavailable, target, err)
 	}
-	return arcpay.ResolvePrivatePath(target)
+	resolved, err := arcpay.ResolvePrivatePath(target)
+	if err != nil {
+		return "", err
+	}
+	if err := refuseRootDir(resolved); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+// refuseRootDir refuses a resolved state directory that is the root directory,
+// as checkPathFlags refuses the flag itself.
+func refuseRootDir(resolved string) error {
+	if filepath.Clean(resolved) == string(filepath.Separator) {
+		return fmt.Errorf("%w: -state-dir %s resolves to the root directory", arcpay.ErrViolation, resolved)
+	}
+	return nil
 }
 
 // checkpointer builds the log's checkpointer from this state, so it starts

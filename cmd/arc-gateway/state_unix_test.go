@@ -3,7 +3,9 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -324,7 +326,7 @@ func TestRelativeOrRootPathsAreRefused(t *testing.T) {
 		}
 	}
 	for _, root := range []string{"/", "//", "/./"} {
-		if _, err := openLogState(abs, root, pub, [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "root directory") {
+		if _, err := openLogState(abs, root, pub, [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "must not be the root directory") {
 			t.Fatalf("-state-dir %q: %v", root, err)
 		}
 	}
@@ -372,5 +374,103 @@ func TestGatewayFollowsSystemSymlinks(t *testing.T) {
 	defer func() { _ = st.close() }()
 	if st.path != filepath.Join(real, "decisions.json") || st.stateDir != filepath.Join(real, "state") {
 		t.Fatalf("not opened through the resolved path: %q, %q", st.path, st.stateDir)
+	}
+}
+
+// §6: the log key path is cleaned, its directory walked, and the seed read at
+// the walked path.
+func TestLogKeyIsReadAtTheWalkedPath(t *testing.T) {
+	base := tempDir(t)
+	keys := mkdirMode(t, filepath.Join(base, "keys"), 0o700)
+	target := mkdirMode(t, filepath.Join(base, "target"), 0o777)
+	mkdirMode(t, filepath.Join(target, "x"), 0o700)
+	mkdirMode(t, filepath.Join(target, "keys"), 0o700)
+	a, b := strings.Repeat("11", 32), strings.Repeat("22", 32)
+	if err := os.WriteFile(filepath.Join(keys, "log.key"), []byte(a+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "keys", "log.key"), []byte(b+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(target, "x"), filepath.Join(base, "ulink")); err != nil {
+		t.Fatal(err)
+	}
+	sep := string(filepath.Separator)
+	flag := base + sep + "ulink" + sep + ".." + sep + "keys" + sep + "log.key"
+	key, err := loadEd25519(flag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := hex.DecodeString(a)
+	if !bytes.Equal(key.Seed(), want) {
+		t.Fatal("loadEd25519 read a seed other than the one at the walked path")
+	}
+}
+
+// A log key that does not parse is reported at its resolved path.
+func TestLogKeyErrorNamesTheResolvedPath(t *testing.T) {
+	keys := mkdirMode(t, filepath.Join(tempDir(t), "keys"), 0o700)
+	if err := os.WriteFile(filepath.Join(keys, "log.key"), []byte("not hex\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sep := string(filepath.Separator)
+	flag := keys + sep + "." + sep + "log.key"
+	_, err := loadEd25519(flag)
+	if !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), filepath.Join(keys, "log.key")) || strings.Contains(errText(err), flag) {
+		t.Fatalf("unparsable log key: %v", err)
+	}
+}
+
+// checkLogPath returns "" with every error.
+func TestCheckLogPathReturnsEmptyOnError(t *testing.T) {
+	wide := mkdirMode(t, filepath.Join(tempDir(t), "wide"), 0o777)
+	if got, err := checkLogPath(filepath.Join(wide, "decisions.json")); err == nil || got != "" {
+		t.Fatalf("log in a writable directory: %q, %v", got, err)
+	}
+	logs := mkdirMode(t, filepath.Join(tempDir(t), "logs"), 0o700)
+	if err := os.Symlink(filepath.Join(logs, "real.json"), filepath.Join(logs, "decisions.json")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := checkLogPath(filepath.Join(logs, "decisions.json")); err == nil || got != "" {
+		t.Fatalf("symlinked log: %q, %v", got, err)
+	}
+}
+
+// §6: a state directory that resolves to the root directory is refused, as the
+// flag itself is.
+func TestStateDirResolvingToRootIsRefused(t *testing.T) {
+	for _, p := range []string{"/", "//"} {
+		if err := refuseRootDir(p); !errors.Is(err, arcpay.ErrViolation) {
+			t.Fatalf("resolved %q: %v", p, err)
+		}
+	}
+	if err := refuseRootDir("/var/lib/spt-txn-arc/state"); err != nil {
+		t.Fatalf("an ordinary path: %v", err)
+	}
+	// On macOS, /Volumes/Macintosh HD is a root-owned symlink to /.
+	const link = "/Volumes/Macintosh HD"
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Skip("no root-owned symlink to / on this host")
+	}
+	if target, _ := os.Readlink(link); target != "/" {
+		t.Skip("the symlink does not point at /")
+	}
+	path, pub := stateDir(t)
+	if _, err := openLogState(path, link, pub, [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "resolves to the root directory") {
+		t.Fatalf("-state-dir %q: %v", link, err)
+	}
+}
+
+// checkStateDir returns "" with every error, from the parent's walk and from
+// the state directory's own.
+func TestCheckStateDirReturnsEmptyOnError(t *testing.T) {
+	shared := mkdirMode(t, filepath.Join(tempDir(t), "shared"), 0o777)
+	if got, err := checkStateDir(filepath.Join(shared, "state")); err == nil || got != "" {
+		t.Fatalf("writable parent: got %q, %v", got, err)
+	}
+	parent := mkdirMode(t, filepath.Join(tempDir(t), "parent"), 0o700)
+	mkdirMode(t, filepath.Join(parent, "state"), 0o777)
+	if got, err := checkStateDir(filepath.Join(parent, "state")); err == nil || got != "" {
+		t.Fatalf("writable state directory: got %q, %v", got, err)
 	}
 }

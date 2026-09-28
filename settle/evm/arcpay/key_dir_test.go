@@ -3,6 +3,7 @@
 package arcpay
 
 import (
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -244,5 +245,161 @@ func TestKeyDirectoryIsWalked(t *testing.T) {
 	}
 	if err := CheckKeyFile(key); !errors.Is(err, ErrViolation) || !strings.Contains(err.Error(), "not sticky") {
 		t.Fatalf("key below a group-writable directory: %v", err)
+	}
+}
+
+func writeKey(t *testing.T, path, hexKey string, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(hexKey+"\n"), mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil { // #nosec G302 -- the case under test
+		t.Fatal(err)
+	}
+}
+
+// §6: a key path is cleaned, its directory walked, and the key read at the
+// walked path.
+func TestKeyIsReadAtTheWalkedPath(t *testing.T) {
+	a, b := strings.Repeat("11", 32), strings.Repeat("22", 32)
+	base := resolvedTemp(t)
+	keys := mkdirs(t, 0o700, filepath.Join(base, "keys"))
+	target := mkdirs(t, 0o777, filepath.Join(base, "target"))
+	mkdirs(t, 0o700, filepath.Join(target, "x"))
+	mkdirs(t, 0o700, filepath.Join(target, "keys"))
+	writeKey(t, filepath.Join(keys, "pay.key"), a, 0o600)
+	writeKey(t, filepath.Join(target, "keys", "pay.key"), b, 0o600)
+	if err := os.Symlink(filepath.Join(target, "x"), filepath.Join(base, "ulink")); err != nil {
+		t.Fatal(err)
+	}
+	sep := string(filepath.Separator)
+	flag := base + sep + "ulink" + sep + ".." + sep + "keys" + sep + "pay.key"
+	resolved, err := ResolveKeyFile(flag)
+	if err != nil || resolved != filepath.Join(keys, "pay.key") {
+		t.Fatalf("ResolveKeyFile: %q, %v", resolved, err)
+	}
+	key, err := LoadKey(flag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := hex.EncodeToString(key.D.FillBytes(make([]byte, 32))); d != a {
+		t.Fatalf("LoadKey read key %s, not the key at %s", d[:8], resolved)
+	}
+}
+
+// ResolveKeyFile returns the walked path, not the cleaned flag.
+func TestKeyPathReturnedIsTheResolvedPath(t *testing.T) {
+	base := resolvedTemp(t)
+	keys := mkdirs(t, 0o700, filepath.Join(base, "real", "keys"))
+	writeKey(t, filepath.Join(keys, "pay.key"), strings.Repeat("11", 32), 0o600)
+	if err := os.Symlink(filepath.Join(base, "real"), filepath.Join(base, "tlink")); err != nil {
+		t.Fatal(err)
+	}
+	trustLinks(t, "tlink")
+	cleaned := filepath.Join(base, "tlink", "keys", "pay.key")
+	resolved, err := ResolveKeyFile(cleaned)
+	if err != nil || resolved != filepath.Join(keys, "pay.key") {
+		t.Fatalf("got %q, %v; want %q", resolved, err, filepath.Join(keys, "pay.key"))
+	}
+}
+
+// The key file itself: a symlink, a directory, or group- or world-readable
+// is refused.
+func TestKeyFileRules(t *testing.T) {
+	base := resolvedTemp(t)
+	keys := mkdirs(t, 0o700, filepath.Join(base, "keys"))
+	writeKey(t, filepath.Join(keys, "real.key"), strings.Repeat("11", 32), 0o600)
+	if err := os.Symlink(filepath.Join(keys, "real.key"), filepath.Join(keys, "link.key")); err != nil {
+		t.Fatal(err)
+	}
+	mkdirs(t, 0o700, filepath.Join(keys, "dir.key"))
+	writeKey(t, filepath.Join(keys, "group.key"), strings.Repeat("11", 32), 0o640)
+	writeKey(t, filepath.Join(keys, "other.key"), strings.Repeat("11", 32), 0o604)
+	for name, want := range map[string]string{
+		"link.key":  "not a regular file",
+		"dir.key":   "not a regular file",
+		"group.key": "group- or world-readable",
+		"other.key": "group- or world-readable",
+	} {
+		got, err := ResolveKeyFile(filepath.Join(keys, name))
+		if !errors.Is(err, ErrViolation) || !strings.Contains(err.Error(), want) || got != "" {
+			t.Fatalf("%s: got %q, %v; want a refusal containing %q", name, got, err, want)
+		}
+	}
+	if _, err := ResolveKeyFile(filepath.Join(keys, "real.key")); err != nil {
+		t.Fatalf("owner-only key: %v", err)
+	}
+}
+
+// The key's directory is judged by the rule for the last directory: a sticky,
+// world-writable directory is refused there.
+func TestKeyDirectoryIsJudgedAsTheLastDirectory(t *testing.T) {
+	keys := mkdirs(t, 0o777|os.ModeSticky, filepath.Join(resolvedTemp(t), "keys"))
+	writeKey(t, filepath.Join(keys, "pay.key"), strings.Repeat("11", 32), 0o600)
+	if got, err := ResolveKeyFile(filepath.Join(keys, "pay.key")); !errors.Is(err, ErrViolation) || got != "" {
+		t.Fatalf("key in a sticky, world-writable directory: %q, %v", got, err)
+	}
+}
+
+// A missing key directory is reported with the commands that create it.
+func TestMissingKeyDirectoryGivesTheFirstRunHint(t *testing.T) {
+	flag := filepath.Join(resolvedTemp(t), "absent", "pay.key")
+	_, err := ResolveKeyFile(flag)
+	if !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "mkdir -p") || !strings.Contains(err.Error(), "openssl rand -hex 32") {
+		t.Fatalf("missing key directory: %v", err)
+	}
+}
+
+// A key that does not parse is reported at its resolved path.
+func TestKeyErrorNamesTheResolvedPath(t *testing.T) {
+	base := resolvedTemp(t)
+	keys := mkdirs(t, 0o700, filepath.Join(base, "real", "keys"))
+	writeKey(t, filepath.Join(keys, "pay.key"), "not hex", 0o600)
+	if err := os.Symlink(filepath.Join(base, "real"), filepath.Join(base, "tlink")); err != nil {
+		t.Fatal(err)
+	}
+	trustLinks(t, "tlink")
+	_, err := LoadKey(filepath.Join(base, "tlink", "keys", "pay.key"))
+	if !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), filepath.Join(keys, "pay.key")) {
+		t.Fatalf("unparsable key: %v", err)
+	}
+}
+
+// Every resolve error returns "", never a partly resolved path.
+func TestResolveReturnsEmptyOnError(t *testing.T) {
+	base := resolvedTemp(t)
+	wide := mkdirs(t, 0o777, filepath.Join(base, "wide"))
+	if err := os.Symlink("b", filepath.Join(base, "a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a", filepath.Join(base, "b")); err != nil {
+		t.Fatal(err)
+	}
+	trustLinks(t, "a", "b")
+	for name, f := range map[string]func() (string, error){
+		"writable last directory": func() (string, error) { return ResolvePrivatePath(wide) },
+		"below a writable parent": func() (string, error) { return ResolvePrivatePath(filepath.Join(wide, "x")) },
+		"missing parent":          func() (string, error) { return ResolveParentPath(filepath.Join(base, "absent")) },
+		"symlink loop":            func() (string, error) { return ResolvePrivatePath(filepath.Join(base, "a")) },
+		"missing key":             func() (string, error) { return ResolveKeyFile(filepath.Join(base, "none.key")) },
+	} {
+		got, err := f()
+		if err == nil || got != "" {
+			t.Fatalf("%s: got %q, %v; want \"\" and an error", name, got, err)
+		}
+	}
+}
+
+// A root-owned symlink to / resolves to /; callers that must not use the root
+// directory refuse the resolved path (the gateway's state directory does).
+func TestRootOwnedLinkToRootResolvesToRoot(t *testing.T) {
+	base := resolvedTemp(t)
+	if err := os.Symlink("/", filepath.Join(base, "toroot")); err != nil {
+		t.Fatal(err)
+	}
+	trustLinks(t, "toroot")
+	got, err := ResolvePrivatePath(filepath.Join(base, "toroot"))
+	if err != nil || got != string(filepath.Separator) {
+		t.Fatalf("got %q, %v; want the root directory", got, err)
 	}
 }
