@@ -57,6 +57,7 @@ func main() {
 	maxFee := flag.Uint64("max-fee", 50_000, "ceiling on each payment's total fee, micro-USDC")
 	dryRun := flag.Bool("dry-run", false, "run the guard but never sign or broadcast a payment")
 	evaluateOnly := flag.Bool("evaluate-only", false, "hold no payment key; offer evaluate_payment, which returns the decision and can never settle (refuses -key and -dry-run)")
+	stateDir := flag.String("state-dir", defaultStateDir(), "directory for per-capability payment counts and locks, shared by every gateway on this machine account")
 	verifyRPC := flag.String("verify-rpc", "", "optional second, independent endpoint; the payer's nonce must agree on both (recommended on mainnet)")
 	flag.Parse()
 
@@ -97,10 +98,14 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	log, err := openLog(*logPath, logKey.Public().(ed25519.PublicKey))
+	// The lock is taken before the log, the count or the checkpoint record is
+	// read, and held until exit (§6).
+	st, err := openLogState(*logPath, *stateDir, logKey.Public().(ed25519.PublicKey), capDigest)
 	if err != nil {
 		fatal(err)
 	}
+	defer func() { _ = st.close() }()
+	log := st.log
 
 	ctx := context.Background()
 	client, err := ethclient.DialContext(ctx, *rpcURL)
@@ -116,11 +121,6 @@ func main() {
 		fatal(fmt.Errorf("%w: %w", arcpay.ErrViolation, err))
 	}
 
-	countPath := *logPath + ".count"
-	used, err := loadCount(countPath, capDigest)
-	if err != nil {
-		fatal(fmt.Errorf("%w: %w", arcpay.ErrViolation, err))
-	}
 	asset := evm.AccountIDBase58(cap.Net.USDC)
 	enf := &mcpgate.Enforcer{
 		Scheme:  "exact",
@@ -132,7 +132,7 @@ func main() {
 		Policy: countingPolicy{
 			exact: mcpgate.ExactPayment{Asset: asset, PayTo: evm.AccountIDBase58(cap.Recipient), Resource: cap.Resource, MaxAmount: cap.MaxMicro},
 			max:   cap.MaxPayments,
-			used:  &used,
+			used:  &st.used,
 		},
 		Spend: gate.NewMemSpendLog(),
 		Log:   log,
@@ -167,28 +167,21 @@ func main() {
 		}
 	}
 
-	saved := log.Len() // the log was saved by openLog
-	cp := newCheckpointer(cap.Net, client, cpKey, log, *cpEvery, func() int { return saved }, os.Stderr)
-	persist := func() error {
-		if err := log.Save(*logPath); err != nil {
-			return err
-		}
-		saved = log.Len()
-		return saveCount(countPath, capDigest, used)
-	}
+	cp := st.checkpointer(cap.Net, client, cpKey, *cpEvery, os.Stderr)
 	s := &server{
 		mode: mode,
 		cap:  cap, enf: enf, settle: settle,
-		persist: persist,
+		persist: st.save,
 		onEntry: cp.maybePublish,
-		now:     time.Now, used: &used,
+		now:     time.Now, used: &st.used,
 		out: os.Stdout, diag: os.Stderr,
 	}
 
 	fmt.Fprintln(os.Stderr, "spt-txn arc-gateway ready (stdio).")
 	fmt.Fprintf(os.Stderr, "  network:    %s %s\n", cap.Net.Name, cap.Net.CAIP2)
 	fmt.Fprintf(os.Stderr, "  capability: pay <= %s USDC to %s for %q, at most %d payment(s) (%d used), until %s\n",
-		arcpay.USDC(new(big.Int).SetUint64(cap.MaxMicro)), cap.Recipient.Hex(), cap.Resource, cap.MaxPayments, used, cap.ExpiresAt.Format(time.RFC3339))
+		arcpay.USDC(new(big.Int).SetUint64(cap.MaxMicro)), cap.Recipient.Hex(), cap.Resource, cap.MaxPayments, st.used, cap.ExpiresAt.Format(time.RFC3339))
+	fmt.Fprintf(os.Stderr, "  state:      %s\n", *stateDir)
 	fmt.Fprintf(os.Stderr, "  mode:       %s (tool %s)\n", mode, s.toolName())
 	fmt.Fprintf(os.Stderr, "  payer:      %s\n  checkpoints from %s every %d decisions\n", payer, cpAddr, *cpEvery)
 	fmt.Fprintf(os.Stderr, "  log key:    %s (%d entries loaded)\n", hex.EncodeToString(logKey.Public().(ed25519.PublicKey)), log.Len())
@@ -203,6 +196,16 @@ func main() {
 	if serr != nil {
 		fatal(fmt.Errorf("%w: input stream ended with an error: %w", arcpay.ErrUnavailable, serr))
 	}
+}
+
+// defaultStateDir is spt-txn/arc-gateway under the user's configuration
+// directory, or "" if there is none, in which case -state-dir is required.
+func defaultStateDir() string {
+	d, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(d, "spt-txn", "arc-gateway")
 }
 
 // loadEd25519 reads a log signing key: a 32-byte Ed25519 seed as 64 hex

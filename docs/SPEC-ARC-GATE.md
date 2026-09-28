@@ -89,10 +89,22 @@ person reading the file sees. Unknown fields are refused.
 `max_payments` is enforced inside the enforcement point's policy, so a refusal
 for a used-up capability is a recorded DENY like any other. It is a count of
 authorizations, not a spending budget. An ALLOW is counted as soon as it is
-issued, before it is persisted, and the count is saved next to the log keyed by
-the SHA-256 of the capability file's exact bytes. A restart, whoever causes it,
-resumes the count for the same capability; a different capability file starts
-a new count. The asset is always the selected network's USDC; it
+issued, before it is persisted, and the count is saved in the gateway's state
+directory (`-state-dir`, by default `spt-txn/arc-gateway` under the user's
+configuration directory) under the SHA-256 of the capability file's exact bytes.
+The count belongs to the capability, not to a log: every gateway on the machine
+account that uses the same capability file meets the same count, whatever `-log`
+it names. A restart, whoever causes it, resumes it; a different capability file,
+including a reformatted copy of the same one, is a new approval with its own
+count. The count is also written beside the log, per capability
+(`<log>.<digest>.count`), and at startup the higher is used (an unkeyed
+`<log>.count` from an earlier version is read too, and never written), so a gateway on the same log whose default state
+directory differs (the default follows the environment: `HOME`, and on Linux
+`XDG_CONFIG_HOME`) still sees it. Startup prints the state directory in use. A
+gateway started with both a different `-state-dir` and a different `-log`, or
+under another user account, keeps its own count: run every gateway for one
+capability with the same state directory, and name it explicitly when more than
+one host launches the gateway. The asset is always the selected network's USDC; it
 is not configurable. The recipient is carried to the enforcement point in the
 transport form of §A.2 (base58 of the 32-byte widened account id).
 
@@ -198,14 +210,57 @@ publication, not authorization. The minimum interval bounds how fast an agent
 flooding the server with calls can spend the checkpoint key's gas.
 
 **Key.** Its own key file, separate from the payment key and from the log
-signing key (three keys, three roles). It holds only enough USDC for gas.
+signing key (three keys, three roles). It holds only enough USDC for gas. One
+checkpoint key serves one log: the checkpoint data does not name the log, so
+two logs checkpointed by one key would put two roots for one size under the
+same sender.
 
 ## 6. Log persistence
 
 The log signing key and the log itself are files. The log is saved after every
 append, before the tool-call returns; if the save fails, the call returns an
-error and settlement does not run. On restart the log is loaded and verified
+error and settlement does not run. The payment count is written first, then the
+log, so an interruption between the two leaves the count at or above the ALLOWs
+in the log, never below. Both counts are also written once at startup, so a
+location that cannot be written or synced stops startup rather than every later
+call. On restart the log is loaded and verified
 (`translog.LoadLog`) before the server accepts a call.
+
+**One gateway per log, and per capability.** At startup the gateway takes two
+exclusive, non-blocking locks before it reads the log, the payment count or the
+checkpoint record, and holds both until it exits: `<log>.lock` beside the log,
+and `<digest>.lock` in the state directory for the capability. If either is
+held, startup refuses. It also refuses if a lock file's name stops referring to
+the file it locked, and if the state directory is writable by anyone but its
+owner. Before every save of a decision the gateway checks again that both lock
+files are still the files it locked; if either is gone or replaced, nothing is
+saved and nothing is settled. The locks are the operating system's advisory `flock`: it binds every
+gateway on one machine, not processes that ignore it, and it is not reliable on
+a network file system, which is not supported. On a platform without `flock` the
+gateway refuses to start.
+
+**The last checkpoint is remembered.** Once a checkpoint transaction is seen
+mined, its size, root and transaction are saved atomically next to the log
+(`<log>.checkpoint`). A checkpoint that is sent but not seen mined is not
+recorded, and the next run publishes that head again; a reverted one is sent
+again. Only one checkpoint is in flight at a time: a newer head waits until the
+pending one is seen mined or reverted, or until it has gone unseen for ten
+minutes, when it is dropped unrecorded and its head is sent again. The pending checkpoint is looked for at
+every decision, after the reply, so the record trails the chain by at most that
+one checkpoint: a gateway killed
+right after sending one leaves it unrecorded. A head already recorded is not
+published again. At startup the gateway
+refuses if the record names more entries than the log holds, or if the log's
+first n entries do not hash to the recorded root.
+
+The record is a local, unsigned file. It detects a log that diverged from it by
+accident (a restored or truncated log, a copy from another run); it does not
+detect a log and record replaced together, or a record deleted, and it is not a
+comparison with the chain. The chain is the authority: a reader checks the log
+against the checkpoint transactions, as the README describes. **Recovery**, when
+startup refuses on the record: compare the log with the checkpoints on chain.
+If the log matches the chain, the record is stale and can be removed; if it does
+not, the log is not the published one and must not be used under that log key.
 
 ## 6a. Modes, and an evaluate-only mode an agent can verify
 
@@ -287,7 +342,20 @@ Each fails when the control it names is reverted:
    `-evaluate-only`; the server offers `evaluate_payment` and never
    `authorize_payment`, and the live server the reverse; an evaluate-only ALLOW
    never reaches a settler, even one that is present, and is counted; every
-   reply begins with the mode and broadcast line.
+   reply begins with the mode line.
+10. A second gateway on the same log, or on the same capability with a different
+    log, refuses to start while the first holds it, including from a separate
+    process, and starts once it has exited; nothing is read before the locks are
+    held; the count follows the capability across log paths and is kept beside
+    the log too; a state directory others can write to, or a count location
+    that cannot be written, is refused at startup; a decision is not saved once
+    a lock file is gone or replaced; a count that cannot be written stops the
+    save before the log is written, and a log that cannot be written fails the
+    save. The checkpoint runs after the reply is written. A checkpoint is
+    recorded only once mined, and at the next decision if it was mined in
+    between; one is in flight at a time; a reverted one is sent again; a
+    recorded head is not published again; startup refuses a record beyond the
+    log's length or one whose root does not match the log.
 
 Followed by an adversarial review in a fresh context before any of it is
 published.
