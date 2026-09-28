@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm/arcpay"
@@ -22,8 +23,8 @@ func newPub(t *testing.T) ed25519.PublicKey {
 // §6: a log directory group or others can write is refused before anything
 // is created or read in it.
 func TestLogDirMustBeOwnerOnly(t *testing.T) {
-	for _, mode := range []os.FileMode{0o775, 0o777, 0o720} {
-		dir := filepath.Join(t.TempDir(), "logs")
+	for _, mode := range []os.FileMode{0o775, 0o777, 0o720, 0o707, 0o702} {
+		dir := filepath.Join(tempDir(t), "logs")
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -47,14 +48,14 @@ func TestLogDirMustBeOwnerOnly(t *testing.T) {
 // mode is 0700. Needs permission to chown, which normally means root.
 func TestDirOwnedByAnotherUserIsRefused(t *testing.T) {
 	for _, which := range []string{"state", "log"} {
-		dir := filepath.Join(t.TempDir(), which)
+		dir := filepath.Join(tempDir(t), which)
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Chown(dir, os.Geteuid()+1, -1); err != nil {
 			t.Skipf("cannot chown a directory to another uid in this environment (%v); the owner check is not exercised here, the mode checks are", err)
 		}
-		logPath, stateDir := filepath.Join(t.TempDir(), "decisions.json"), dir
+		logPath, stateDir := filepath.Join(tempDir(t), "decisions.json"), dir
 		if which == "log" {
 			logPath, stateDir = filepath.Join(dir, "decisions.json"), testState(t)
 		}
@@ -68,7 +69,7 @@ func TestDirOwnedByAnotherUserIsRefused(t *testing.T) {
 // §6: -log must name the real file. A symlink is refused, and no lock is
 // taken beside the link or beside its target.
 func TestSymlinkedLogIsRefused(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	target := filepath.Join(dir, "real.json")
 	l, _ := logWith(t, 1, 0)
 	if err := l.Save(target); err != nil {
@@ -92,11 +93,11 @@ func TestSymlinkedLogIsRefused(t *testing.T) {
 // §6: a -log whose directory is a symlink is refused, whether or not the log
 // exists yet.
 func TestLogInSymlinkedDirectoryIsRefused(t *testing.T) {
-	real := filepath.Join(t.TempDir(), "real")
+	real := filepath.Join(tempDir(t), "real")
 	if err := os.Mkdir(real, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	linkDir := filepath.Join(t.TempDir(), "linkdir")
+	linkDir := filepath.Join(tempDir(t), "linkdir")
 	if err := os.Symlink(real, linkDir); err != nil {
 		t.Fatal(err)
 	}
@@ -117,20 +118,152 @@ func TestLogInSymlinkedDirectoryIsRefused(t *testing.T) {
 	}
 }
 
-// The owner check without chown: /usr is owned by root and mode 0755, so it
-// passes the mode check and only the owner check can refuse it. MkdirAll on
-// the existing directory succeeds, and the owner check still refuses.
-func TestExistingRootOwnedStateDirIsRefused(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: /usr is owned by this uid")
+// foreignDir finds an existing directory owned by a uid that is neither this
+// process's nor root's, not writable by group or others, whose parent path is
+// private. It skips the test if the host has none.
+func foreignDir(t *testing.T) string {
+	t.Helper()
+	var candidates []string
+	for _, glob := range []string{"/private/var/*", "/var/*", "/usr/local/*", "/opt/*", "/srv/*"} {
+		m, _ := filepath.Glob(glob)
+		candidates = append(candidates, m...)
 	}
-	fi, err := os.Stat("/usr")
-	if err != nil || fi.Mode().Perm()&0o022 != 0 {
-		t.Skipf("/usr is not a root-owned, owner-only-writable directory here (%v)", err)
+	for _, c := range candidates {
+		fi, err := os.Lstat(c)
+		if err != nil || !fi.IsDir() || fi.Mode().Perm()&0o022 != 0 {
+			continue
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok || st.Uid == 0 || int(st.Uid) == os.Geteuid() {
+			continue
+		}
+		if arcpay.CheckPrivatePath(filepath.Dir(c)) != nil {
+			continue
+		}
+		return c
 	}
-	path := filepath.Join(t.TempDir(), "decisions.json")
-	_, err = openLogState(path, "/usr", newPub(t), [32]byte{1})
-	if !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "owned by uid 0") {
-		t.Fatalf("root-owned state directory: %v", err)
+	t.Skip("no directory owned by another non-root uid on this host")
+	return ""
+}
+
+// §6: a log or state directory owned by another non-root uid is refused, at
+// both call sites, without needing chown.
+func TestLogAndStateDirOwnedByAnotherUidAreRefused(t *testing.T) {
+	dir := foreignDir(t)
+	_, err := openLogState(filepath.Join(dir, "decisions.json"), testState(t), newPub(t), [32]byte{1})
+	if !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "owned by uid") {
+		t.Fatalf("log directory %s owned by another uid: %v", dir, err)
+	}
+	path, pub := stateDir(t)
+	if _, err := openLogState(path, dir, pub, [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "owned by uid") {
+		t.Fatalf("state directory %s owned by another uid: %v", dir, err)
+	}
+}
+
+func mkdirMode(t *testing.T, path string, mode os.FileMode) string {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil { // #nosec G302 -- the case under test
+		t.Fatal(err)
+	}
+	return path
+}
+
+// §6: a directory above the log or state directory that group or others can
+// write, without the sticky bit, is refused; with the sticky bit it is
+// accepted.
+func TestWritableAncestorNeedsTheStickyBit(t *testing.T) {
+	base := tempDir(t)
+	shared := mkdirMode(t, filepath.Join(base, "shared"), 0o777)
+	logs := mkdirMode(t, filepath.Join(shared, "logs"), 0o700)
+	state := filepath.Join(shared, "state")
+	if _, err := openLogState(filepath.Join(logs, "decisions.json"), testState(t), newPub(t), [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "not sticky") {
+		t.Fatalf("log under a writable, non-sticky directory: %v", err)
+	}
+	path, pub := stateDir(t)
+	if _, err := openLogState(path, state, pub, [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "not sticky") {
+		t.Fatalf("state directory under a writable, non-sticky directory: %v", err)
+	}
+	if err := os.Chmod(shared, 0o777|os.ModeSticky); err != nil { // #nosec G302 -- the case under test
+		t.Fatal(err)
+	}
+	st, err := openLogState(filepath.Join(logs, "decisions.json"), state, newPub(t), [32]byte{1})
+	if err != nil {
+		t.Fatalf("log and state under a sticky directory: %v", err)
+	}
+	_ = st.close()
+}
+
+// §6: the sticky bit is an exception only above; the log and state
+// directories themselves must not be writable by group or others at all.
+func TestStickyLeafDirIsRefused(t *testing.T) {
+	base := tempDir(t)
+	logs := mkdirMode(t, filepath.Join(base, "logs"), 0o777|os.ModeSticky)
+	if _, err := openLogState(filepath.Join(logs, "decisions.json"), testState(t), newPub(t), [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) {
+		t.Fatalf("sticky, writable log directory: %v", err)
+	}
+	state := mkdirMode(t, filepath.Join(base, "state"), 0o777|os.ModeSticky)
+	path, pub := stateDir(t)
+	if _, err := openLogState(path, state, pub, [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) {
+		t.Fatalf("sticky, writable state directory: %v", err)
+	}
+}
+
+// §6: a symlink anywhere above the log or state directory is refused.
+func TestSymlinkedAncestorIsRefused(t *testing.T) {
+	base := tempDir(t)
+	mkdirMode(t, filepath.Join(base, "real", "sub"), 0o700)
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(filepath.Join(base, "real"), link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openLogState(filepath.Join(link, "sub", "decisions.json"), testState(t), newPub(t), [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "symlink") {
+		t.Fatalf("log below a symlinked directory: %v", err)
+	}
+	path, pub := stateDir(t)
+	if _, err := openLogState(path, filepath.Join(link, "state"), pub, [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "symlink") {
+		t.Fatalf("state directory below a symlinked directory: %v", err)
+	}
+}
+
+// §6: a ".." after a symlink is removed lexically before anything is opened,
+// so every file lands in the directory that was checked.
+func TestDotDotAfterSymlinkStaysInTheCheckedDirectory(t *testing.T) {
+	base := tempDir(t)
+	a := mkdirMode(t, filepath.Join(base, "a"), 0o700)
+	wide := mkdirMode(t, filepath.Join(base, "wide", "sub"), 0o700)
+	if err := os.Symlink(wide, filepath.Join(a, "b")); err != nil {
+		t.Fatal(err)
+	}
+	// Concatenated, not filepath.Join, which would clean the ".." away.
+	raw := a + string(filepath.Separator) + "b" + string(filepath.Separator) + ".." + string(filepath.Separator) + "decisions.json"
+	st, err := openLogState(raw, testState(t), newPub(t), [32]byte{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.used = 1
+	if err := st.save(); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.close()
+	entries, _ := os.ReadDir(filepath.Join(base, "wide"))
+	for _, e := range entries {
+		if e.Name() != "sub" {
+			t.Fatalf("a file landed beside the symlink's target: %s", e.Name())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(a, "decisions.json")); err != nil {
+		t.Fatalf("log not in the checked directory: %v", err)
+	}
+}
+
+// §6: a -log that cannot be examined is unavailable, not accepted.
+func TestUnreadableLogPathIsUnavailable(t *testing.T) {
+	logs := mkdirMode(t, filepath.Join(tempDir(t), "logs"), 0o600) // no search permission
+	defer func() { _ = os.Chmod(logs, 0o700) }()
+	if _, err := openLogState(filepath.Join(logs, "decisions.json"), testState(t), newPub(t), [32]byte{1}); !errors.Is(err, arcpay.ErrUnavailable) {
+		t.Fatalf("log in a directory without search permission: %v", err)
 	}
 }

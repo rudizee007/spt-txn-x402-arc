@@ -246,9 +246,16 @@ record, the lock files and the state directory are assumed to be owned by the
 operator account that runs the gateway. `flock` is advisory and is not a control
 between user accounts: what keeps another account out is ownership. The
 directory holding the log and the state directory are refused if group or others
-can write them, or if another user owns them; `-log` is refused if it, or its
-directory, is a symlink (it is not resolved: name the real file). Network and
-shared file systems are not supported. The locks are the operating system's
+can write them (a sticky bit does not change that), or if anyone but the
+operator account or root owns them. Every directory above them must be owned by
+the operator account or root and must not be writable by group or others unless
+its sticky bit is set, as `/tmp` is. No component of either path may be a
+symlink, and `-log` itself may not be one; they are not resolved: name the real
+path. Paths are cleaned before use, so a `..` is removed before anything is
+opened. Permission bits are what is checked: an access control list that grants
+another account write access (for example one inherited on macOS) is not
+detected and is not supported. Network and shared file systems are not
+supported. The locks are the operating system's
 advisory `flock`: it binds every gateway on one machine, not processes that
 ignore it, and it is not reliable on a network file system, which is not
 supported. On a platform without `flock` the gateway refuses to start.

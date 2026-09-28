@@ -24,16 +24,28 @@ import (
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm/arcpay/arcpaytest"
 )
 
+// tempDir is t.TempDir with symlinks resolved: the gateway refuses a symlink
+// anywhere on the log or state path, and on macOS the temp directory sits
+// under /var, which is a symlink to /private/var.
+func tempDir(t *testing.T) string {
+	t.Helper()
+	d, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 func stateDir(t *testing.T) (string, ed25519.PublicKey) {
 	t.Helper()
 	pub, _, _ := ed25519.GenerateKey(nil)
-	return filepath.Join(t.TempDir(), "decisions.json"), pub
+	return filepath.Join(tempDir(t), "decisions.json"), pub
 }
 
 // testState is one state directory shared by every gateway in a test.
 func testState(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(t.TempDir(), "state")
+	return filepath.Join(tempDir(t), "state")
 }
 
 // §6: one gateway per log. A second one refuses while the first holds the
@@ -124,7 +136,7 @@ func logWith(t *testing.T, n int, salt byte) (*translog.Log, ed25519.PrivateKey)
 func TestCheckpointRecordMustMatchTheLog(t *testing.T) {
 	l, priv := logWith(t, 3, 0)
 	root, _ := l.Head()
-	path := filepath.Join(t.TempDir(), "log.checkpoint")
+	path := filepath.Join(tempDir(t), "log.checkpoint")
 	write := func(s string) {
 		t.Helper()
 		if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
@@ -198,7 +210,7 @@ func TestUnrecordedCheckpointIsReported(t *testing.T) {
 	fake, cp, _, _ := checkpointFixture(t)
 	var diag bytes.Buffer
 	cp.diag = &diag
-	cp.headPath = filepath.Join(t.TempDir(), "missing-dir", "log.checkpoint")
+	cp.headPath = filepath.Join(tempDir(t), "missing-dir", "log.checkpoint")
 	cp.publishNow()
 	if len(fake.Broadcasts()) != 1 || !strings.Contains(diag.String(), "was not recorded") {
 		t.Fatalf("broadcasts %d, diag %q", len(fake.Broadcasts()), diag.String())
@@ -228,7 +240,7 @@ func TestStateCheckpointerStartsFromTheRecordedHead(t *testing.T) {
 
 // The state carries the log on disk, not a fresh one.
 func TestStateLoadsTheSavedLog(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "decisions.json")
+	path := filepath.Join(tempDir(t), "decisions.json")
 	l, _ := logWith(t, 2, 0)
 	if err := l.Save(path); err != nil {
 		t.Fatal(err)
@@ -251,15 +263,15 @@ func bytes32(b byte) []byte { d := [32]byte{b}; return d[:] }
 func TestSameCapabilityDifferentLogRefusesToStart(t *testing.T) {
 	sd := testState(t)
 	pub, _, _ := ed25519.GenerateKey(nil)
-	a, err := openLogState(filepath.Join(t.TempDir(), "a.json"), sd, pub, [32]byte{1})
+	a, err := openLogState(filepath.Join(tempDir(t), "a.json"), sd, pub, [32]byte{1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = a.close() }()
-	if _, err := openLogState(filepath.Join(t.TempDir(), "b.json"), sd, pub, [32]byte{1}); !errors.Is(err, arcpay.ErrUnavailable) || !strings.Contains(errText(err), "capability") {
+	if _, err := openLogState(filepath.Join(tempDir(t), "b.json"), sd, pub, [32]byte{1}); !errors.Is(err, arcpay.ErrUnavailable) || !strings.Contains(errText(err), "capability") {
 		t.Fatalf("second gateway on one capability, other log: %v", err)
 	}
-	c, err := openLogState(filepath.Join(t.TempDir(), "c.json"), sd, pub, [32]byte{2})
+	c, err := openLogState(filepath.Join(tempDir(t), "c.json"), sd, pub, [32]byte{2})
 	if err != nil {
 		t.Fatalf("gateway on another capability: %v", err)
 	}
@@ -271,7 +283,7 @@ func TestSameCapabilityDifferentLogRefusesToStart(t *testing.T) {
 func TestCountFollowsTheCapabilityAcrossLogs(t *testing.T) {
 	sd := testState(t)
 	pub, _, _ := ed25519.GenerateKey(nil)
-	a, err := openLogState(filepath.Join(t.TempDir(), "a.json"), sd, pub, [32]byte{3})
+	a, err := openLogState(filepath.Join(tempDir(t), "a.json"), sd, pub, [32]byte{3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +291,7 @@ func TestCountFollowsTheCapabilityAcrossLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = a.close()
-	b, err := openLogState(filepath.Join(t.TempDir(), "b.json"), sd, pub, [32]byte{3})
+	b, err := openLogState(filepath.Join(tempDir(t), "b.json"), sd, pub, [32]byte{3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +336,7 @@ func TestStateDirMustBeOwnerOnly(t *testing.T) {
 // Opening state loads the checkpoint record: a matching one sets the recorded
 // head, and one the log does not match stops startup.
 func TestOpenStateChecksTheCheckpointRecord(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "decisions.json")
+	path := filepath.Join(tempDir(t), "decisions.json")
 	l, _ := logWith(t, 3, 0)
 	if err := l.Save(path); err != nil {
 		t.Fatal(err)
@@ -539,7 +551,7 @@ func TestCheckpointRunsAfterTheReply(t *testing.T) {
 // §6: a count that cannot be written stops the save before the log is
 // written, so the log never holds an ALLOW the count lacks.
 func TestCountWriteFailureStopsTheSaveBeforeTheLog(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "decisions.json")
+	path := filepath.Join(tempDir(t), "decisions.json")
 	l, priv := logWith(t, 1, 0)
 	if err := l.Save(path); err != nil {
 		t.Fatal(err)
@@ -573,7 +585,7 @@ func TestCountWriteFailureStopsTheSaveBeforeTheLog(t *testing.T) {
 // §6: a log that cannot be saved fails the save and leaves the saved size, so
 // no unsaved head is checkpointed.
 func TestLogSaveFailureFailsTheSave(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "decisions.json")
 	l, priv := logWith(t, 1, 0)
 	if err := l.Save(path); err != nil {

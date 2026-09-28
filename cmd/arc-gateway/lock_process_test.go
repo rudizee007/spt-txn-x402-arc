@@ -70,7 +70,7 @@ func TestHelperHoldLogLock(t *testing.T) {
 // A lock file replaced after it was locked is refused: the name no longer
 // refers to the locked file.
 func TestLockFileReplacedWhileTakenIsRefused(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "x.lock")
+	path := filepath.Join(tempDir(t), "x.lock")
 	afterFlock = func(p string) {
 		_ = os.Remove(p)
 		_ = os.WriteFile(p, nil, 0o600)

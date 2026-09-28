@@ -105,8 +105,9 @@ mkdir -p ~/.config/spt-txn && chmod 700 ~/.config/spt-txn
 ```
 
 The command refuses a key file that is group- or world-readable, a key path that
-is not a regular file, and a containing directory anyone else can write to. It
-never reads the key from an environment variable and never prints it.
+is not a regular file, and a containing directory that group or others can write
+to or that is owned by anyone but you or root. It never reads the key from an
+environment variable and never prints it.
 
 To learn the address to fund, run any command — it prints `payer:` before it
 does anything else. Then fund that exact address with Arc testnet USDC at

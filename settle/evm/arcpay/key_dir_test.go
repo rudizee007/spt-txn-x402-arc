@@ -34,20 +34,70 @@ func TestKeyInWritableDirectoryIsRefused(t *testing.T) {
 	}
 }
 
-// The owner check on its own: /usr is owned by root and not group- or
-// world-writable, so only the owner check can refuse it.
-func TestOwnerOnlyDirRefusesAnotherOwner(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: /usr is owned by this uid")
+// The owner rule: this uid or root may own the directory; anyone else may
+// not. The uid is swapped so the rule is exercised without root.
+func TestOwnerOnlyDirOwners(t *testing.T) {
+	if fi, err := os.Stat("/usr"); err == nil && fi.Mode().Perm()&0o022 == 0 {
+		if err := CheckOwnerOnlyDir("/usr"); err != nil {
+			t.Fatalf("root-owned directory refused: %v", err)
+		}
 	}
-	fi, err := os.Stat("/usr")
-	if err != nil || fi.Mode().Perm()&0o022 != 0 {
-		t.Skipf("/usr is not a root-owned, owner-only-writable directory here (%v)", err)
+	own, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := CheckOwnerOnlyDir("/usr"); !errors.Is(err, ErrViolation) || !strings.Contains(err.Error(), "owned by uid 0") {
-		t.Fatalf("root-owned directory: %v", err)
+	if err := CheckOwnerOnlyDir(own); err != nil {
+		t.Fatalf("own directory: %v", err)
 	}
-	if err := CheckOwnerOnlyDir(t.TempDir()); err != nil {
-		t.Fatalf("own temp directory: %v", err)
+	real := effectiveUID
+	defer func() { effectiveUID = real }()
+	effectiveUID = func() uint32 { return real() + 1 }
+	if err := CheckOwnerOnlyDir(own); !errors.Is(err, ErrViolation) || !strings.Contains(err.Error(), "owned by uid") {
+		t.Fatalf("directory owned by another uid: %v", err)
+	}
+	if err := CheckPrivatePath(own); !errors.Is(err, ErrViolation) || !strings.Contains(err.Error(), "owned by uid") {
+		t.Fatalf("path through directories owned by another uid: %v", err)
+	}
+}
+
+// A directory that cannot be examined is unavailable, never accepted.
+func TestMissingDirectoryIsUnavailable(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(base, "absent")
+	if err := CheckOwnerOnlyDir(missing); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("CheckOwnerOnlyDir on a missing directory: %v", err)
+	}
+	if err := CheckPrivatePath(missing); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("CheckPrivatePath on a missing directory: %v", err)
+	}
+}
+
+// A directory above the checked one that another uid owns is refused, even
+// when the checked directory itself is ours and owner-only.
+func TestPrivatePathRefusesAForeignOwnedAncestor(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := filepath.Join(base, "theirs", "ours")
+	if err := os.MkdirAll(leaf, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckPrivatePath(leaf); err != nil {
+		t.Fatalf("all ours: %v", err)
+	}
+	real := ownerUID
+	defer func() { ownerUID = real }()
+	ownerUID = func(fi os.FileInfo) (uint32, bool) {
+		if fi.Name() == "theirs" {
+			return effectiveUID() + 4242, true
+		}
+		return real(fi)
+	}
+	if err := CheckPrivatePath(leaf); !errors.Is(err, ErrViolation) || !strings.Contains(err.Error(), "above") {
+		t.Fatalf("ancestor owned by another uid: %v", err)
 	}
 }
