@@ -98,6 +98,57 @@ Decoding it on chain shows what was signed rather than what our tooling reports:
 is exactly 68 bytes with selector `a9059cbb`, and it carries the bound recipient
 and amount. The access list is empty and there is no authorization list.
 
+### An agent behind the gate, on Arc mainnet
+
+Recorded 2026-09-27: [video](https://youtu.be/kRMIhftiTjA), 1:30.
+
+One human-approved capability,
+[`docs/evidence/m2-mainnet/capability.json`](docs/evidence/m2-mainnet/capability.json):
+at most 0.01 USDC, once, to `0x79A34Cc563f848f626038Ff312CCEBfb5374971d`, for
+`invoice:42`, until 22:11 UTC. Every decision under it is in one signed log,
+[`docs/evidence/m2-mainnet/decisions.json`](docs/evidence/m2-mainnet/decisions.json),
+whose head was checkpointed on Arc after each decision.
+
+| Log entry | Request | Decision |
+|---|---|---|
+| 0, 2 | 0.5 USDC to an address that is not the approved recipient | refused |
+| 1, 3 | 5 USDC to the approved recipient, over the ceiling | refused |
+| 4 | 0.01 USDC to the approved recipient | allowed, settled |
+
+- Entries 0 to 3 came from Claude Desktop calling `evaluate_payment`, with the
+  gateway in evaluate-only mode (`-evaluate-only`, no payment key loaded;
+  [`docs/SPEC-ARC-GATE.md`](docs/SPEC-ARC-GATE.md) §6a). Entries 0 and 1 are a
+  rehearsal; 2 and 3 are the recording.
+- Entry 4 came from the same gateway in live mode, on the same capability and
+  the same log, driven from a terminal.
+
+| What | Value |
+|---|---|
+| Settlement | [`0x69e075ae090c4e59f5b43dad5577d7b796e07a55f4bc451fe7e3f324aaade24a`](https://explorer.arc.io/tx/0x69e075ae090c4e59f5b43dad5577d7b796e07a55f4bc451fe7e3f324aaade24a) |
+| Block / time | 23089190 · 2026-09-27 21:04:25 UTC |
+| Payer → recipient | `0x4788Ca19912c9d6c08b44698acF8F00C48bAa628` → `0x79A34Cc563f848f626038Ff312CCEBfb5374971d` |
+| Amount | 10000 micro-USDC (0.01 USDC), `transfer` on the USDC contract |
+| Fee | 0.00097876 USDC (gas used 48938) |
+| Checkpoints | n = 1 [`0xfe04b6e6…`](https://explorer.arc.io/tx/0xfe04b6e63bd419f1b6ebbd97827c703447b5a0bfaddcafae502b77fd5ddb5a9b) · n = 2 [`0x44ec6b45…`](https://explorer.arc.io/tx/0x44ec6b458110b308fa11dcd27439bb876afa4ba39754a1b0691d041f8d6b992d) · n = 3 [`0x2edf0996…`](https://explorer.arc.io/tx/0x2edf0996ec23452dcbc48ea5fb819ae642a9c6dc5aecb2d655c3f865408d9af7) · n = 4 [`0x87658d59…`](https://explorer.arc.io/tx/0x87658d590270a31723b2f05a39bb44ee1ff7aa33a2639bd779ec4c48c1066266) · n = 5 [`0x1617ad97…`](https://explorer.arc.io/tx/0x1617ad97d822cf98352ad64c23fbfcbefbd099568a4ef0b37be2b5252ed46b92) |
+| Checkpoint key | `0xcCdE9f3E57091756630A8f839A6C34F24B757058` |
+| Log verifying key | `6e0ce1f251d434cde69cb5aedf2143376cca7c5e58867220305e10aabbd5e018` (Ed25519) |
+| Code | `main` at `72c8749` |
+
+**Check it yourself.** `translog.LoadLog` from `spt-txn-pep` v0.7.0 verifies every
+signature and hash link and recomputes the root rather than trusting the file:
+
+```go
+l, err := translog.LoadLog("docs/evidence/m2-mainnet/decisions.json") // refuses a file that does not verify
+root, n := l.Head()                                                  // 5, 16563cb5…d5f6
+```
+
+Then confirm three things: the file's `pubkey` is the log verifying key above;
+the n = 5 checkpoint's data is `spt-txn/translog-checkpoint/v1`, then `n` as a
+big-endian uint64, then that root; and it was sent by the checkpoint key. Changing
+any entry breaks its signature, and dropping or reordering entries changes the
+root. Each entry commits to its tool call by digest (`binding`); the calls
+themselves are not published.
+
 ## Layout
 
 | Path | Build | What it is |
