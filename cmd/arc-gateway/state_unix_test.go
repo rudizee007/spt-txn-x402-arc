@@ -4,6 +4,7 @@ package main
 
 import (
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -230,7 +231,7 @@ func TestSymlinkedAncestorIsRefused(t *testing.T) {
 
 // §6: a ".." after a symlink is removed lexically before anything is opened,
 // so every file lands in the directory that was checked.
-func TestDotDotAfterSymlinkStaysInTheCheckedDirectory(t *testing.T) {
+func TestPathsAreCleanedBeforeUse(t *testing.T) {
 	base := tempDir(t)
 	a := mkdirMode(t, filepath.Join(base, "a"), 0o700)
 	wide := mkdirMode(t, filepath.Join(base, "wide", "sub"), 0o700)
@@ -265,5 +266,78 @@ func TestUnreadableLogPathIsUnavailable(t *testing.T) {
 	defer func() { _ = os.Chmod(logs, 0o700) }()
 	if _, err := openLogState(filepath.Join(logs, "decisions.json"), testState(t), newPub(t), [32]byte{1}); !errors.Is(err, arcpay.ErrUnavailable) {
 		t.Fatalf("log in a directory without search permission: %v", err)
+	}
+}
+
+// §3, §6: -state-dir and -log have no default. An empty one is refused and
+// nothing is created in the working directory.
+func TestEmptyStateOrLogPathIsRefused(t *testing.T) {
+	cwd := tempDir(t)
+	t.Chdir(cwd)
+	path, pub := stateDir(t)
+	for _, empty := range []string{"", "  ", "\t"} {
+		if _, err := openLogState(path, empty, pub, [32]byte{1}); !errors.Is(err, arcpay.ErrUnavailable) || !strings.Contains(errText(err), "/var/lib/spt-txn-arc/state") {
+			t.Fatalf("empty -state-dir %q: %v", empty, err)
+		}
+	}
+	if _, err := openLogState("", testState(t), pub, [32]byte{1}); !errors.Is(err, arcpay.ErrUnavailable) {
+		t.Fatalf("empty -log: %v", err)
+	}
+	if entries, _ := os.ReadDir(cwd); len(entries) != 0 {
+		t.Fatalf("files created in the working directory: %v", entries)
+	}
+}
+
+// §6: a directory above that group can write, without the sticky bit, is
+// refused, as one that others can write is.
+func TestGroupWritableAncestorIsRefused(t *testing.T) {
+	for _, mode := range []os.FileMode{0o770, 0o775} {
+		shared := mkdirMode(t, filepath.Join(tempDir(t), "shared"), mode)
+		logs := mkdirMode(t, filepath.Join(shared, "logs"), 0o700)
+		if _, err := openLogState(filepath.Join(logs, "decisions.json"), testState(t), newPub(t), [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "not sticky") {
+			t.Fatalf("log under a directory of mode %04o: %v", mode, err)
+		}
+		path, pub := stateDir(t)
+		if _, err := openLogState(path, filepath.Join(shared, "state"), pub, [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "not sticky") {
+			t.Fatalf("state directory under a directory of mode %04o: %v", mode, err)
+		}
+	}
+}
+
+// §6: relative paths are checked where they resolve, against the working
+// directory, and the files are created there.
+func TestRelativePathsAreCheckedWhereTheyResolve(t *testing.T) {
+	base := tempDir(t)
+	mkdirMode(t, filepath.Join(base, "logs"), 0o700)
+	t.Chdir(base)
+	st, err := openLogState(filepath.Join("logs", "decisions.json"), "state", newPub(t), [32]byte{1})
+	if err != nil {
+		t.Fatalf("relative paths under a private directory: %v", err)
+	}
+	_ = st.close()
+	id := hex.EncodeToString(bytes32(1))
+	for _, f := range []string{
+		filepath.Join(base, "logs", "decisions.json"),
+		filepath.Join(base, "logs", "decisions.json.lock"),
+		filepath.Join(base, "logs", "decisions.json."+id+".count"),
+		filepath.Join(base, "state", id+".lock"),
+		filepath.Join(base, "state", id+".count"),
+	} {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatalf("expected %s: %v", f, err)
+		}
+	}
+	entries, _ := os.ReadDir(base)
+	for _, e := range entries {
+		if e.Name() != "logs" && e.Name() != "state" {
+			t.Fatalf("unexpected file in the working directory: %s", e.Name())
+		}
+	}
+
+	shared := mkdirMode(t, filepath.Join(base, "shared"), 0o770)
+	mkdirMode(t, filepath.Join(shared, "logs"), 0o700)
+	t.Chdir(shared)
+	if _, err := openLogState(filepath.Join("logs", "decisions.json"), filepath.Join(base, "state2"), newPub(t), [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) || !strings.Contains(errText(err), "not sticky") {
+		t.Fatalf("relative log below a group-writable working directory: %v", err)
 	}
 }

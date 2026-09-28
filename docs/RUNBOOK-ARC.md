@@ -263,3 +263,66 @@ Mainnet is never a default. Everything above is testnet.
 0.01 USDC from `0x4788…a628` to `0x79A3…971d`, fee 0.0014861538 USDC. Dry run first
 (`guard: PASS`), then settle (`guard: PASS`, `post-sign: PASS`, `SETTLED`). Details in the
 README.
+
+## G. `arc-gateway` install layout (Linux)
+
+Where a client installation keeps the gateway's files. The rules it must meet are
+in `docs/SPEC-ARC-GATE.md` §6; this layout meets them on stock Linux and RHEL.
+
+```text
+Signed log, counts, checkpoint:  /var/lib/spt-txn-arc/          service user, 0700
+-state-dir:                      /var/lib/spt-txn-arc/state/    service user, 0700
+Keys and approval file:          /etc/spt-txn-arc/              root:spt-arc 0750, keys 0400 or 0600
+Diagnostics:                     stderr → journald
+```
+
+- **Not `/var/log`.** The signed log is state, not a text log: log rotation would
+  rename or truncate it and break its signatures and its match with the on-chain
+  checkpoints, and on some distributions `/var/log` is group-writable, which the
+  gateway refuses.
+- **Not `DynamicUser=`.** It makes `/var/lib/<name>` a symlink, which the gateway
+  refuses. Use a fixed service user.
+- **`-log` and `-state-dir` are required** and have no default.
+- **OpenBSD:** a dedicated `/var/<daemon>` directory owned by the service user,
+  mode 0700, not a group-shared 770 directory.
+
+`arc-gateway` speaks MCP over stdin and stdout, so under systemd it is started per
+client connection by socket activation. A minimal sketch:
+
+```ini
+# /etc/systemd/system/arc-gateway.socket
+[Socket]
+ListenStream=/run/spt-txn-arc/mcp.sock
+SocketUser=spt-arc
+SocketMode=0600
+Accept=yes
+
+[Install]
+WantedBy=sockets.target
+```
+
+```ini
+# /etc/systemd/system/arc-gateway@.service
+[Service]
+User=spt-arc
+StateDirectory=spt-txn-arc
+StateDirectoryMode=0700
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+ProtectSystem=strict
+ReadWritePaths=/var/lib/spt-txn-arc
+NoNewPrivileges=yes
+PrivateTmp=yes
+ExecStart=/usr/local/bin/arc-gateway \
+  -capability /etc/spt-txn-arc/capability.json \
+  -rpc https://rpc.mainnet.arc.io \
+  -key /etc/spt-txn-arc/pay.key \
+  -checkpoint-key /etc/spt-txn-arc/checkpoint.key \
+  -log-key /etc/spt-txn-arc/log.key \
+  -log /var/lib/spt-txn-arc/decisions.json \
+  -state-dir /var/lib/spt-txn-arc/state
+```
+
+One connection is served at a time per capability: a second connection's instance
+finds the log and capability locks held and exits with a refusal.

@@ -57,7 +57,7 @@ func main() {
 	maxFee := flag.Uint64("max-fee", 50_000, "ceiling on each payment's total fee, micro-USDC")
 	dryRun := flag.Bool("dry-run", false, "run the guard but never sign or broadcast a payment")
 	evaluateOnly := flag.Bool("evaluate-only", false, "hold no payment key; offer evaluate_payment, which returns the decision and can never settle (refuses -key and -dry-run)")
-	stateDir := flag.String("state-dir", defaultStateDir(), "directory for per-capability payment counts and locks, shared by every gateway on this machine account")
+	stateDir := flag.String("state-dir", "", "directory for per-capability payment counts and locks, shared by every gateway for a capability (required)")
 	verifyRPC := flag.String("verify-rpc", "", "optional second, independent endpoint; the payer's nonce must agree on both (recommended on mainnet)")
 	flag.Parse()
 
@@ -70,6 +70,9 @@ func main() {
 		if v == "" {
 			fatal(fmt.Errorf("%w: -%s is required and has no default", arcpay.ErrUnavailable, name))
 		}
+	}
+	if strings.TrimSpace(*stateDir) == "" {
+		fatal(fmt.Errorf("%w: %s", arcpay.ErrUnavailable, stateDirRequired))
 	}
 	if *cpEvery < 1 {
 		fatal(fmt.Errorf("%w: -checkpoint-every must be at least 1", arcpay.ErrViolation))
@@ -196,16 +199,6 @@ func main() {
 	if serr != nil {
 		fatal(fmt.Errorf("%w: input stream ended with an error: %w", arcpay.ErrUnavailable, serr))
 	}
-}
-
-// defaultStateDir is spt-txn/arc-gateway under the user's configuration
-// directory, or "" if there is none, in which case -state-dir is required.
-func defaultStateDir() string {
-	d, err := os.UserConfigDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(d, "spt-txn", "arc-gateway")
 }
 
 // loadEd25519 reads a log signing key: a 32-byte Ed25519 seed as 64 hex

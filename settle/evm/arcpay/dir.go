@@ -31,8 +31,7 @@ func CheckOwnerOnlyDir(dir string) error {
 // CheckPrivatePath refuses dir unless no component of its absolute path is a
 // symlink, every directory above it is owned by this process's uid or root and
 // is not writable by group or others unless its sticky bit is set, and dir
-// itself passes CheckOwnerOnlyDir. A directory that another account can rename
-// entries in lets that account replace dir, however dir itself is set up.
+// itself passes CheckOwnerOnlyDir.
 func CheckPrivatePath(dir string) error {
 	abs, err := filepath.Abs(filepath.Clean(dir))
 	if err != nil {

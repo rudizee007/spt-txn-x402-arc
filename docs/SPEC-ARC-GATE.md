@@ -90,8 +90,9 @@ person reading the file sees. Unknown fields are refused.
 for a used-up capability is a recorded DENY like any other. It is a count of
 authorizations, not a spending budget. An ALLOW is counted as soon as it is
 issued, before it is persisted, and the count is saved in the gateway's state
-directory (`-state-dir`, by default `spt-txn/arc-gateway` under the user's
-configuration directory) under the SHA-256 of the capability file's exact bytes.
+directory (`-state-dir`, required, with no default; on Linux
+`/var/lib/spt-txn-arc/state`) under the SHA-256 of the capability file's exact
+bytes. A missing or empty `-state-dir` stops startup.
 The count belongs to the capability, not to a log: every gateway on the machine
 account that uses the same capability file meets the same count, whatever `-log`
 it names. A restart, whoever causes it, resumes it; a different capability file,
@@ -99,12 +100,10 @@ including a reformatted copy of the same one, is a new approval with its own
 count. The count is also written beside the log, per capability
 (`<log>.<digest>.count`), and at startup the higher is used (an unkeyed
 `<log>.count` from an earlier version is read too, and never written), so a
-gateway on the same log whose default state directory differs (the default
-follows the environment: `HOME`, and on Linux `XDG_CONFIG_HOME`) still sees it.
-Startup prints the state directory in use. A gateway started with both a
-different `-state-dir` and a different `-log`, or under another user account,
-keeps its own count: run every gateway for one capability with the same state
-directory, and name it explicitly when more than one host launches the gateway.
+gateway on the same log with a different `-state-dir` still sees it. Startup
+prints the state directory in use. A gateway started with both a different
+`-state-dir` and a different `-log`, or under another user account, keeps its
+own count: run every gateway for one capability with the same state directory.
 The asset is always the selected network's USDC; it is not configurable. The
 recipient is carried to the enforcement point in the transport form of §A.2
 (base58 of the 32-byte widened account id).
@@ -238,27 +237,28 @@ exclusive, non-blocking locks before it reads the log, the payment count or the
 checkpoint record, and holds both until it exits: `<log>.lock` beside the log,
 and `<digest>.lock` in the state directory for the capability. If either is
 held, startup refuses. It also refuses if a lock file's name stops referring to
-the file it locked, and if the state directory is writable by anyone but its
-owner. Before every save of a decision the gateway checks again that both lock
-files are still the files it locked; if either is gone or replaced, nothing is
-saved and nothing is settled. The log, the counts beside it, the checkpoint
-record, the lock files and the state directory are assumed to be owned by the
-operator account that runs the gateway. `flock` is advisory and is not a control
-between user accounts: what keeps another account out is ownership. The
-directory holding the log and the state directory are refused if group or others
-can write them (a sticky bit does not change that), or if anyone but the
-operator account or root owns them. Every directory above them must be owned by
-the operator account or root and must not be writable by group or others unless
-its sticky bit is set, as `/tmp` is. No component of either path may be a
-symlink, and `-log` itself may not be one; they are not resolved: name the real
-path. Paths are cleaned before use, so a `..` is removed before anything is
-opened. Permission bits are what is checked: an access control list that grants
-another account write access (for example one inherited on macOS) is not
-detected and is not supported. Network and shared file systems are not
-supported. The locks are the operating system's
-advisory `flock`: it binds every gateway on one machine, not processes that
-ignore it, and it is not reliable on a network file system, which is not
-supported. On a platform without `flock` the gateway refuses to start.
+the file it locked. Before every save of a decision the gateway checks again
+that both lock files are still the files it locked; if either is gone or
+replaced, nothing is saved and nothing is settled. The log, the counts beside
+it, the checkpoint record, the lock files and the state directory are assumed to
+be owned by the operator account that runs the gateway. `flock` is advisory and
+is not a control between user accounts: what keeps another account out is
+ownership. The directory holding the log and the state directory are refused if
+group or others can write them (a sticky bit does not change that), or if anyone
+but the operator account or root owns them. Every directory above them must be
+owned by the operator account or root and must not be writable by group or
+others unless its sticky bit is set (for example a real, sticky world-writable
+`/tmp` directory; on macOS `/tmp` is a symlink and is refused). No component of
+either path may be a symlink, and `-log` itself may not be one; they are not
+resolved: name the real path. A relative path is resolved against the process's
+working directory, then cleaned and walked, so a `..` is removed before anything
+is opened. The checks use the owner uid and the mode bits only; an access
+control list that grants another account write access (for example one inherited
+on macOS) is not detected and is not supported. Network and shared file systems
+are not supported. The locks are the operating system's advisory `flock`: it
+binds every gateway on one machine, not processes that ignore it, and it is not
+reliable on a network file system, which is not supported. On a platform without
+`flock` the gateway refuses to start.
 
 **The last checkpoint is remembered.** Once a checkpoint transaction is seen
 mined, its size, root and transaction are saved atomically next to the log

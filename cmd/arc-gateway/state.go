@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -23,6 +24,9 @@ import (
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm"
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm/arcpay"
 )
+
+// stateDirRequired is the refusal for a missing or empty -state-dir.
+const stateDirRequired = "-state-dir is required and has no default; on Linux use /var/lib/spt-txn-arc/state (RUNBOOK-ARC.md, install layout)"
 
 // logState is what the gateway holds while it runs (SPEC-ARC-GATE §3, §6): a
 // lock on its log, a lock on its capability, the log, the payment count for the
@@ -45,8 +49,14 @@ type logState struct {
 // keyed by the capability's digest in one state directory, so every gateway on
 // this capability, whatever its log path, meets the same lock and count.
 func openLogState(logPath, stateDir string, pub ed25519.PublicKey, capDigest [32]byte) (*logState, error) {
-	// Every file is opened through the cleaned paths that were checked, so a
-	// ".." after a symlink cannot resolve somewhere the checks never looked.
+	// An empty path is refused before cleaning, which would turn it into ".".
+	if strings.TrimSpace(logPath) == "" {
+		return nil, fmt.Errorf("%w: -log is required and has no default", arcpay.ErrUnavailable)
+	}
+	if strings.TrimSpace(stateDir) == "" {
+		return nil, fmt.Errorf("%w: %s", arcpay.ErrUnavailable, stateDirRequired)
+	}
+	// Every file is opened through the cleaned paths that were checked.
 	logPath, stateDir = filepath.Clean(logPath), filepath.Clean(stateDir)
 	if err := checkLogPath(logPath); err != nil {
 		return nil, err
