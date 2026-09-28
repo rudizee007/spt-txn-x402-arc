@@ -285,10 +285,17 @@ Diagnostics:                     stderr → journald
   rename or truncate it and break its signatures and its match with the on-chain
   checkpoints, and on some distributions `/var/log` is group-writable, which the
   gateway refuses.
-- **Not `DynamicUser=`.** It makes `/var/lib/<name>` a symlink, which the gateway
-  refuses. Use a fixed service user.
+- **Use a fixed service user**, not `DynamicUser=`, so the files keep one owner
+  across restarts.
+- **Symlinks on the path:** one owned by root in a directory that passes the rules
+  is followed (for example `/home` → `/usr/home` on FreeBSD, `/var` and `/tmp` on
+  macOS); any other symlink is refused, with a message naming it.
 - **`-log` and `-state-dir` are required, have no default, and must be absolute
-  paths.**
+  paths.** The directory above `-state-dir` must exist; the gateway creates the
+  state directory itself, mode 0700.
+- **Installing under a user account** (for example an agent host run by a person):
+  use an absolute path the account owns, such as `$HOME/.local/state/spt-txn-arc/`
+  on Linux or `~/Library/Application Support/spt-txn-arc/` on macOS, mode 0700.
 - **OpenBSD:** a dedicated `/var/<daemon>` directory owned by the service user,
   mode 0700, not a group-shared 770 directory.
 

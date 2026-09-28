@@ -52,7 +52,8 @@ func checkPathFlags(logPath, stateDir string) error {
 // lock on its log, a lock on its capability, the log, the payment count for the
 // capability, and the size of the last head recorded as on chain.
 type logState struct {
-	path       string // the -log path
+	path       string // the log path, resolved
+	stateDir   string // the -state-dir path, resolved
 	countPath  string // the capability's count, in the state directory
 	besidePath string // the capability's count, beside the log
 	digest     [32]byte
@@ -72,16 +73,17 @@ func openLogState(logPath, stateDir string, pub ed25519.PublicKey, capDigest [32
 	if err := checkPathFlags(logPath, stateDir); err != nil {
 		return nil, err
 	}
-	// Every file is opened through the cleaned paths that were checked.
-	logPath, stateDir = filepath.Clean(logPath), filepath.Clean(stateDir)
-	if err := checkLogPath(logPath); err != nil {
+	// Every file is opened through the paths the walk resolved.
+	logPath, err := checkLogPath(filepath.Clean(logPath))
+	if err != nil {
 		return nil, err
 	}
 	lock, err := lockFile(logPath+".lock", "log "+logPath)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkStateDir(stateDir); err != nil {
+	stateDir, err = checkStateDir(filepath.Clean(stateDir))
+	if err != nil {
 		_ = lock.Close()
 		return nil, err
 	}
@@ -122,7 +124,7 @@ func openLogState(logPath, stateDir string, pub ed25519.PublicKey, capDigest [32
 	if err != nil {
 		return fail(err)
 	}
-	st := &logState{path: logPath, countPath: countPath, besidePath: besidePath, digest: capDigest, lock: lock, capLock: capLock,
+	st := &logState{path: logPath, stateDir: stateDir, countPath: countPath, besidePath: besidePath, digest: capDigest, lock: lock, capLock: capLock,
 		log: l, used: used, saved: l.Len(), published: published}
 	// Writing both counts now finds, at startup, a location that cannot be
 	// written or synced, rather than at the first decision.
@@ -170,37 +172,40 @@ func stillHeld(f *os.File) error {
 	return nil
 }
 
-// checkLogPath refuses a -log whose directory, or any directory above it, is
-// not private to this account (arcpay.CheckPrivatePath), and a -log that is
-// itself a symlink (SPEC-ARC-GATE §6). The lock, the count copy and the
-// checkpoint record live beside the log, so this one check covers them.
-// Symlinks are refused, not resolved: the operator names the real file.
-func checkLogPath(logPath string) error {
-	p := filepath.Clean(logPath)
-	if err := arcpay.CheckPrivatePath(filepath.Dir(p)); err != nil {
-		return err
+// checkLogPath walks the directory holding -log (arcpay.ResolvePrivatePath)
+// and returns the log path under the resolved directory. The log itself must
+// not be a symlink (SPEC-ARC-GATE §6). The lock, the count copy and the
+// checkpoint record live beside the log, so this one walk covers them.
+func checkLogPath(logPath string) (string, error) {
+	dir, err := arcpay.ResolvePrivatePath(filepath.Dir(logPath))
+	if err != nil {
+		return "", err
 	}
+	p := filepath.Join(dir, filepath.Base(logPath))
 	fi, err := os.Lstat(p)
 	switch {
 	case err == nil && fi.Mode()&os.ModeSymlink != 0:
-		return fmt.Errorf("%w: -log %s is a symlink; name the real file", arcpay.ErrViolation, p)
+		return "", fmt.Errorf("%w: -log %s is a symlink; name the real file", arcpay.ErrViolation, p)
 	case err != nil && !errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("%w: log %s: %w", arcpay.ErrUnavailable, p, err)
+		return "", fmt.Errorf("%w: log %s: %w", arcpay.ErrUnavailable, p, err)
 	}
-	return nil
+	return p, nil
 }
 
-// checkStateDir creates the state directory if needed and refuses it unless it
-// and every directory above it are private to this account
-// (arcpay.CheckPrivatePath): whoever can replace a count file can reset it.
-func checkStateDir(dir string) error {
-	if dir == "" {
-		return fmt.Errorf("%w: no state directory", arcpay.ErrUnavailable)
+// checkStateDir walks the directory above the state directory, creates the
+// state directory inside the resolved parent if it is missing, then walks it,
+// and returns the resolved path (SPEC-ARC-GATE §6). Nothing is created until
+// the path above it has passed.
+func checkStateDir(dir string) (string, error) {
+	parent, err := arcpay.ResolveParentPath(filepath.Dir(dir))
+	if err != nil {
+		return "", err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("%w: create state directory %s: %w", arcpay.ErrUnavailable, dir, err)
+	target := filepath.Join(parent, filepath.Base(dir))
+	if err := os.Mkdir(target, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("%w: create state directory %s: %w", arcpay.ErrUnavailable, target, err)
 	}
-	return arcpay.CheckPrivatePath(dir)
+	return arcpay.ResolvePrivatePath(target)
 }
 
 // checkpointer builds the log's checkpointer from this state, so it starts

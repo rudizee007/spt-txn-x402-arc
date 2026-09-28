@@ -103,7 +103,7 @@ func errText(err error) string {
 func TestStateResumesTheSavedCount(t *testing.T) {
 	path, pub := stateDir(t)
 	sd := testState(t)
-	if err := checkStateDir(sd); err != nil {
+	if _, err := checkStateDir(sd); err != nil {
 		t.Fatal(err)
 	}
 	if err := saveCount(filepath.Join(sd, hex.EncodeToString(bytes32(7))+".count"), [32]byte{7}, 1); err != nil {
@@ -460,7 +460,7 @@ func TestCountIsKeptBesideTheLogToo(t *testing.T) {
 func TestNothingIsReadBeforeTheCapabilityLock(t *testing.T) {
 	path, pub := stateDir(t)
 	sd := testState(t)
-	if err := checkStateDir(sd); err != nil {
+	if _, err := checkStateDir(sd); err != nil {
 		t.Fatal(err)
 	}
 	id := hex.EncodeToString(bytes32(6))

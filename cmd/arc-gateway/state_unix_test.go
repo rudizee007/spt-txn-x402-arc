@@ -332,3 +332,45 @@ func TestRelativeOrRootPathsAreRefused(t *testing.T) {
 		t.Fatalf("files created in the working directory: %v", entries)
 	}
 }
+
+// §6: the state directory is created only inside a parent that passed the
+// walk; a missing or writable parent refuses and nothing is created.
+func TestStateDirIsCreatedOnlyInAVerifiedParent(t *testing.T) {
+	base := tempDir(t)
+	path, pub := stateDir(t)
+	if _, err := openLogState(path, filepath.Join(base, "missing", "state"), pub, [32]byte{1}); !errors.Is(err, arcpay.ErrUnavailable) {
+		t.Fatalf("missing parent: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "missing")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the missing parent was created")
+	}
+	shared := mkdirMode(t, filepath.Join(base, "shared"), 0o777)
+	if _, err := openLogState(path, filepath.Join(shared, "state"), pub, [32]byte{1}); !errors.Is(err, arcpay.ErrViolation) {
+		t.Fatalf("writable parent: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(shared, "state")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the state directory was created in a parent that failed the walk")
+	}
+}
+
+// §6: a path through a root-owned system symlink (on macOS the temp directory
+// is under /var) is followed, and the files are opened through the resolved
+// path.
+func TestGatewayFollowsSystemSymlinks(t *testing.T) {
+	raw := t.TempDir()
+	real, err := filepath.EvalSymlinks(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if real == raw {
+		t.Skip("the temp directory has no symlink on this host")
+	}
+	st, err := openLogState(filepath.Join(raw, "decisions.json"), filepath.Join(raw, "state"), newPub(t), [32]byte{1})
+	if err != nil {
+		t.Fatalf("path through a root-owned symlink: %v", err)
+	}
+	defer func() { _ = st.close() }()
+	if st.path != filepath.Join(real, "decisions.json") || st.stateDir != filepath.Join(real, "state") {
+		t.Fatalf("not opened through the resolved path: %q, %q", st.path, st.stateDir)
+	}
+}

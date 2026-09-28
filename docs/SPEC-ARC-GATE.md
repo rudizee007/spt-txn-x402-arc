@@ -239,27 +239,46 @@ and `<digest>.lock` in the state directory for the capability. If either is
 held, startup refuses. It also refuses if a lock file's name stops referring to
 the file it locked. Before every save of a decision the gateway checks again
 that both lock files are still the files it locked; if either is gone or
-replaced, nothing is saved and nothing is settled. The log, the counts beside
-it, the checkpoint record, the lock files and the state directory are assumed to
-be owned by the operator account that runs the gateway. `flock` is advisory and
-is not a control between user accounts: what keeps another account out is
-ownership. The directory holding the log and the state directory are refused if
-group or others can write them (a sticky bit does not change that), or if anyone
-but the operator account or root owns them. Every directory above them must be
-owned by the operator account or root and must not be writable by group or
-others unless its sticky bit is set (for example a real, sticky world-writable
-`/tmp` directory; on macOS `/tmp` is a symlink and is refused). No component of
-either path may be a symlink, and `-log` itself may not be one; they are not
-resolved: name the real path. `-log` and `-state-dir` must be absolute paths; a
-relative one is refused, and so is a `-state-dir` that is the root directory.
-Paths are cleaned before they are walked, so a `..` is removed before anything
-is opened. The checks use the owner uid and the mode bits only; an access
-control list that grants another account write access (for example one inherited
-on macOS) is not detected and is not supported. Network and shared file systems
-are not supported. The locks are the operating system's advisory `flock`: it
-binds every gateway on one machine, not processes that ignore it, and it is not
-reliable on a network file system, which is not supported. On a platform without
-`flock` the gateway refuses to start.
+replaced, nothing is saved and nothing is settled. The locks are the operating
+system's advisory `flock`: it binds every gateway on one machine, not processes
+that ignore it. On a platform without `flock` the gateway refuses to start.
+
+**Paths.** `-log` and `-state-dir` must be absolute paths; an empty or relative
+one is refused, and so is a `-state-dir` that is the root directory. Paths are
+cleaned before anything else, so a `..` is removed lexically. The gateway then
+walks the directory holding the log, the state directory, and the directory
+holding each key file, one component at a time from the root, and opens every
+file through the path that walk resolved. Every directory above the last one
+must be owned by the operator account or root and must not be writable by group
+or others unless its sticky bit is set (for example a real, sticky
+world-writable `/tmp`). The last directory must be owned by the operator account
+or root and must not be writable by group or others at all; a sticky bit does
+not change that. It is judged from the same lookup the walk made, not a second
+one. A symlink on the path is followed only if the link is owned by root and the
+directory holding it has already passed these rules, as with `/home` linked to
+`/usr/home` on FreeBSD or `/tmp` and `/var` on macOS; the walk then continues at
+the link's target, which is checked in full, and more than 40 links refuse the
+path. Any other symlink is refused. `-log` itself must not be a symlink. The
+state directory, if missing, is created with mode 0700 only after the directory
+above it has passed the walk, and its parent must already exist.
+
+**Design boundaries.** These are decided, not deferred:
+- **Ownership is the control between accounts.** The checks use the owner uid
+  and the mode bits only. The gateway's files are assumed to be owned by the
+  operator account that runs it; that account also holds the payment key, so
+  pinning files by inode or re-checking descriptors would defend only against
+  an account that can already sign directly, and is not done.
+- **Access control lists are not supported.** An ACL that grants another
+  account write access (for example one inherited on macOS) is not detected:
+  reading it needs cgo or an external tool, neither of which the trust boundary
+  allows.
+- **Network and shared file systems are not supported.** `flock` is advisory
+  and not reliable on them.
+- **A checkpoint not seen mined is sent again.** After a restart, or after ten
+  minutes unseen, the same head can be published twice from the checkpoint key.
+  A head is only ever sent after it is saved, so this repeats a root and never
+  contradicts one; the cost is gas. Recording pending transactions to avoid it
+  was considered and not adopted.
 
 **The last checkpoint is remembered.** Once a checkpoint transaction is seen
 mined, its size, root and transaction are saved atomically next to the log
