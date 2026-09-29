@@ -131,7 +131,7 @@ func checkpointFixture(t *testing.T) (*arcpaytest.Fake, *checkpointer, *translog
 	pub, priv, _ := ed25519.GenerateKey(nil)
 	l := translog.NewLog(pub)
 	saved := 0
-	cp := newCheckpointer(net, c, k, l, 1, func() int { return saved }, io.Discard)
+	cp := newCheckpointer(net, c, k, l, 1, func() int { return saved }, 0, filepath.Join(t.TempDir(), "log.checkpoint"), io.Discard)
 	for i := 0; i < 3; i++ {
 		if _, err := l.Append(priv, translog.Allow, [32]byte{byte(i)}, time.Now().Unix()); err != nil {
 			t.Fatal(err)

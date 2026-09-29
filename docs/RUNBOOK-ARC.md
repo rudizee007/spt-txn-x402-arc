@@ -105,8 +105,9 @@ mkdir -p ~/.config/spt-txn && chmod 700 ~/.config/spt-txn
 ```
 
 The command refuses a key file that is group- or world-readable, a key path that
-is not a regular file, and a containing directory anyone else can write to. It
-never reads the key from an environment variable and never prints it.
+is not a regular file, and a containing directory that group or others can write
+to or that is owned by anyone but you or root. It never reads the key from an
+environment variable and never prints it.
 
 To learn the address to fund, run any command — it prints `payer:` before it
 does anything else. Then fund that exact address with Arc testnet USDC at
@@ -262,3 +263,105 @@ Mainnet is never a default. Everything above is testnet.
 0.01 USDC from `0x4788…a628` to `0x79A3…971d`, fee 0.0014861538 USDC. Dry run first
 (`guard: PASS`), then settle (`guard: PASS`, `post-sign: PASS`, `SETTLED`). Details in the
 README.
+
+## G. `arc-gateway` install layout (Linux)
+
+Where a client installation keeps the gateway's files. The rules it must meet are
+in `docs/SPEC-ARC-GATE.md` §6; this layout meets them on stock Linux and RHEL.
+
+```text
+Signed log, counts, checkpoint:  /var/lib/spt-txn-arc/          service user, 0700
+-state-dir:                      /var/lib/spt-txn-arc/state/    service user, 0700
+Keys and approval file:          /etc/spt-txn-arc/              root:spt-arc 0750
+                                 key files owned by spt-arc, 0400 or 0600
+Diagnostics:                     stderr → journald
+```
+
+- **Key files are owned by the service user** (`spt-arc`) with mode 0400 or 0600.
+  The key check refuses any group or other permission, so a key readable only
+  through the group (`root:spt-arc 0440`) is refused, and a key owned by root
+  with mode 0400 cannot be read by the service.
+- **Not `/var/log`.** The signed log is state, not a text log: log rotation would
+  rename or truncate it and break its signatures and its match with the on-chain
+  checkpoints, and on some distributions `/var/log` is group-writable, which the
+  gateway refuses.
+- **Use a fixed service user**, not `DynamicUser=`, so the files keep one owner
+  across restarts.
+- **Symlinks on the path:** one owned by root in a directory that passes the rules
+  is followed (for example `/home` → `/usr/home` on FreeBSD, `/var` and `/tmp` on
+  macOS); any other symlink is refused, with a message naming it.
+- **`-log` and `-state-dir` are required, have no default, and must be absolute
+  paths.** The directory above `-state-dir` must exist; the gateway creates the
+  state directory itself, mode 0700.
+- **Installing under a user account** (for example an agent host run by a person):
+  use an absolute path the account owns, such as `$HOME/.local/state/spt-txn-arc/`
+  on Linux or `~/Library/Application Support/spt-txn-arc/` on macOS, mode 0700.
+- **OpenBSD:** a dedicated `/var/<daemon>` directory owned by the service user,
+  mode 0700, not a group-shared 770 directory.
+
+**How it runs.** `arc-gateway` is an MCP server over stdin and stdout, started as a
+subprocess by the MCP host (the agent runtime), once per host session. It is not a
+network daemon and is not started per connection. Run the MCP host as the service
+user, and the gateway inherits that account. When the host itself runs under
+systemd or in a container, give the host process:
+
+- `User=spt-arc` (a fixed account, not `DynamicUser=`)
+- `StateDirectory=spt-txn-arc` and `StateDirectoryMode=0700`
+- `ProtectSystem=strict` and `ReadWritePaths=/var/lib/spt-txn-arc`
+- `NoNewPrivileges=yes` and `PrivateTmp=yes`
+
+and register the gateway with the host using absolute paths, for example:
+
+```text
+/usr/local/bin/arc-gateway \
+  -capability /etc/spt-txn-arc/capability.json \
+  -rpc https://rpc.mainnet.arc.io \
+  -verify-rpc <a second, independent Arc endpoint> \
+  -key /etc/spt-txn-arc/pay.key \
+  -checkpoint-key /etc/spt-txn-arc/checkpoint.key \
+  -log-key /etc/spt-txn-arc/log.key \
+  -log /var/lib/spt-txn-arc/decisions.json \
+  -state-dir /var/lib/spt-txn-arc/state
+```
+
+**One instance per approval.** Exactly one gateway may serve an approval at any
+moment, including during upgrades. On one machine with one state directory this
+is enforced: a second gateway finds the log and capability locks held and exits
+with a refusal. The locks and counts are local to that machine, so two gateways
+on different machines or with different volumes do not see each other, and each
+would enforce the approval on its own; the deployment must prevent that.
+
+**Containers.** A layout that passes the gateway's checks:
+
+- Run as a non-root user (for example uid 10001), with a read-only root file
+  system.
+- Create `/var/lib/spt-txn-arc` in the image, owned by that user, mode 0700. Mount
+  a Docker/Podman named volume there (on first use it takes the image directory's
+  owner and mode), or a block-backed ReadWriteOnce volume on Kubernetes whose
+  directory an init step has given to that user with mode 0700.
+- Put the keys in a directory owned by the container user, mode 0700, with the
+  key files owned by that user, mode 0400 or 0600. A Kubernetes Secret volume
+  cannot be used directly as the key directory: its entries are symlinks into
+  `..data`, its directory mode is not owner-only, and Kubernetes cannot give each
+  file an owner, so the gateway refuses it. Copy the keys from the Secret into
+  such a directory with an init container, or use a baked-in or bind-mounted
+  directory with the same ownership.
+- On Kubernetes, run one replica and never overlap two: `strategy: Recreate` for a
+  Deployment, or a StatefulSet with `replicas: 1` and a ReadWriteOnce volume
+  (`ReadWriteOncePod`, where available, limits the volume to a single pod). A
+  rolling update starts the new pod before the old one stops, which is two
+  instances.
+
+These are refused, by design, with a message naming the directory:
+
+- a Kubernetes `emptyDir` (created mode 0777, no sticky bit);
+- a volume with `fsGroup` set (group-writable, shared with every container in the
+  pod that has that group);
+- a host directory bind-mounted into a rootless or user-namespaced container, when
+  its owner is not mapped and it appears as `nobody` (65534);
+- a Kubernetes Secret volume used as the key directory (see above).
+
+Network and shared volumes (NFS, AWS EFS, Azure Files, CephFS) are not supported
+and are not detected: the gateway checks owners and modes, not the file-system
+type, so such a volume can pass the checks while `flock` on it is not reliable.
+Do not use them for the log or the state directory.

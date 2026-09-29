@@ -142,13 +142,19 @@ func loadCount(path string, digest [32]byte) (int, error) {
 	return st.Allows, nil
 }
 
-// saveCount writes the count atomically: temp file, fsync, rename.
+// saveCount writes the count atomically.
 func saveCount(path string, digest [32]byte, allows int) error {
 	b, err := json.Marshal(countState{CapabilitySHA256: hex.EncodeToString(digest[:]), Allows: allows})
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".arc-gateway-count-*.tmp")
+	return writeAtomic(path, ".arc-gateway-count-*.tmp", b)
+}
+
+// writeAtomic replaces path with b: temp file in the same directory, mode 0600,
+// fsync, rename.
+func writeAtomic(path, pattern string, b []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), pattern)
 	if err != nil {
 		return err
 	}
@@ -167,7 +173,19 @@ func saveCount(path string, digest [32]byte, allows int) error {
 	if err := errors.Join(write(), tmp.Close()); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// syncDir makes a rename in dir durable.
+func syncDir(dir string) error {
+	d, err := os.Open(filepath.Clean(dir)) // #nosec G304 -- the directory of an operator-named path
+	if err != nil {
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
 }
 
 // capabilityKeys are the only keys a capability file may contain, spelled

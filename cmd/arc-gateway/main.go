@@ -9,9 +9,15 @@
 // Register it with an MCP client, for example:
 //
 //	{ "mcpServers": { "spt-txn-arc": { "command": "/path/to/arc-gateway",
-//	    "args": ["-capability", "cap.json", "-rpc", "https://rpc.testnet.arc.io",
-//	             "-key", "pay.key", "-log-key", "log.key", "-log", "decisions.json",
-//	             "-checkpoint-key", "checkpoint.key"] } } }
+//	    "args": ["-capability", "/etc/spt-txn-arc/capability.json",
+//	             "-rpc", "https://rpc.testnet.arc.io",
+//	             "-key", "/etc/spt-txn-arc/pay.key",
+//	             "-log-key", "/etc/spt-txn-arc/log.key",
+//	             "-checkpoint-key", "/etc/spt-txn-arc/checkpoint.key",
+//	             "-log", "/var/lib/spt-txn-arc/decisions.json",
+//	             "-state-dir", "/var/lib/spt-txn-arc/state"] } } }
+//
+// -log and -state-dir are required and must be absolute paths.
 //
 // Build with CGO_ENABLED=0 go build -tags arc ./cmd/arc-gateway (see nocgo.go).
 // Diagnostics go to stderr; stdout carries only the MCP protocol.
@@ -30,7 +36,6 @@ import (
 	"fmt"
 	"math/big"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -57,6 +62,7 @@ func main() {
 	maxFee := flag.Uint64("max-fee", 50_000, "ceiling on each payment's total fee, micro-USDC")
 	dryRun := flag.Bool("dry-run", false, "run the guard but never sign or broadcast a payment")
 	evaluateOnly := flag.Bool("evaluate-only", false, "hold no payment key; offer evaluate_payment, which returns the decision and can never settle (refuses -key and -dry-run)")
+	stateDir := flag.String("state-dir", "", "directory for per-capability payment counts and locks, shared by every gateway for a capability (required)")
 	verifyRPC := flag.String("verify-rpc", "", "optional second, independent endpoint; the payer's nonce must agree on both (recommended on mainnet)")
 	flag.Parse()
 
@@ -69,6 +75,9 @@ func main() {
 		if v == "" {
 			fatal(fmt.Errorf("%w: -%s is required and has no default", arcpay.ErrUnavailable, name))
 		}
+	}
+	if err := checkPathFlags(*logPath, *stateDir); err != nil {
+		fatal(err)
 	}
 	if *cpEvery < 1 {
 		fatal(fmt.Errorf("%w: -checkpoint-every must be at least 1", arcpay.ErrViolation))
@@ -97,10 +106,14 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	log, err := openLog(*logPath, logKey.Public().(ed25519.PublicKey))
+	// The lock is taken before the log, the count or the checkpoint record is
+	// read, and held until exit (§6).
+	st, err := openLogState(*logPath, *stateDir, logKey.Public().(ed25519.PublicKey), capDigest)
 	if err != nil {
 		fatal(err)
 	}
+	defer func() { _ = st.close() }()
+	log := st.log
 
 	ctx := context.Background()
 	client, err := ethclient.DialContext(ctx, *rpcURL)
@@ -116,11 +129,6 @@ func main() {
 		fatal(fmt.Errorf("%w: %w", arcpay.ErrViolation, err))
 	}
 
-	countPath := *logPath + ".count"
-	used, err := loadCount(countPath, capDigest)
-	if err != nil {
-		fatal(fmt.Errorf("%w: %w", arcpay.ErrViolation, err))
-	}
 	asset := evm.AccountIDBase58(cap.Net.USDC)
 	enf := &mcpgate.Enforcer{
 		Scheme:  "exact",
@@ -132,7 +140,7 @@ func main() {
 		Policy: countingPolicy{
 			exact: mcpgate.ExactPayment{Asset: asset, PayTo: evm.AccountIDBase58(cap.Recipient), Resource: cap.Resource, MaxAmount: cap.MaxMicro},
 			max:   cap.MaxPayments,
-			used:  &used,
+			used:  &st.used,
 		},
 		Spend: gate.NewMemSpendLog(),
 		Log:   log,
@@ -167,28 +175,21 @@ func main() {
 		}
 	}
 
-	saved := log.Len() // the log was saved by openLog
-	cp := newCheckpointer(cap.Net, client, cpKey, log, *cpEvery, func() int { return saved }, os.Stderr)
-	persist := func() error {
-		if err := log.Save(*logPath); err != nil {
-			return err
-		}
-		saved = log.Len()
-		return saveCount(countPath, capDigest, used)
-	}
+	cp := st.checkpointer(cap.Net, client, cpKey, *cpEvery, os.Stderr)
 	s := &server{
 		mode: mode,
 		cap:  cap, enf: enf, settle: settle,
-		persist: persist,
+		persist: st.save,
 		onEntry: cp.maybePublish,
-		now:     time.Now, used: &used,
+		now:     time.Now, used: &st.used,
 		out: os.Stdout, diag: os.Stderr,
 	}
 
 	fmt.Fprintln(os.Stderr, "spt-txn arc-gateway ready (stdio).")
 	fmt.Fprintf(os.Stderr, "  network:    %s %s\n", cap.Net.Name, cap.Net.CAIP2)
 	fmt.Fprintf(os.Stderr, "  capability: pay <= %s USDC to %s for %q, at most %d payment(s) (%d used), until %s\n",
-		arcpay.USDC(new(big.Int).SetUint64(cap.MaxMicro)), cap.Recipient.Hex(), cap.Resource, cap.MaxPayments, used, cap.ExpiresAt.Format(time.RFC3339))
+		arcpay.USDC(new(big.Int).SetUint64(cap.MaxMicro)), cap.Recipient.Hex(), cap.Resource, cap.MaxPayments, st.used, cap.ExpiresAt.Format(time.RFC3339))
+	fmt.Fprintf(os.Stderr, "  log:        %s\n  state:      %s\n", st.path, st.stateDir)
 	fmt.Fprintf(os.Stderr, "  mode:       %s (tool %s)\n", mode, s.toolName())
 	fmt.Fprintf(os.Stderr, "  payer:      %s\n  checkpoints from %s every %d decisions\n", payer, cpAddr, *cpEvery)
 	fmt.Fprintf(os.Stderr, "  log key:    %s (%d entries loaded)\n", hex.EncodeToString(logKey.Public().(ed25519.PublicKey)), log.Len())
@@ -209,18 +210,19 @@ func main() {
 // characters, from a file that passes the same permission checks as every
 // other key.
 func loadEd25519(path string) (ed25519.PrivateKey, error) {
-	if err := arcpay.CheckKeyFile(path); err != nil {
+	resolved, err := arcpay.ResolveKeyFile(path)
+	if err != nil {
 		return nil, err
 	}
-	// #nosec G304 -- the operator names the log key file on the command line,
-	// and CheckKeyFile has already refused an exposed or replaceable file.
-	raw, err := os.ReadFile(filepath.Clean(path))
+	// #nosec G304 -- the path ResolveKeyFile walked and checked, from the
+	// operator's command line.
+	raw, err := os.ReadFile(resolved)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read %s: %w", arcpay.ErrUnavailable, path, err)
+		return nil, fmt.Errorf("%w: read %s: %w", arcpay.ErrUnavailable, resolved, err)
 	}
 	seed, err := hex.DecodeString(strings.TrimSpace(string(raw)))
 	if err != nil || len(seed) != ed25519.SeedSize {
-		return nil, fmt.Errorf("%w: %s must hold exactly 64 hex characters (a 32-byte Ed25519 seed)", arcpay.ErrViolation, path)
+		return nil, fmt.Errorf("%w: %s must hold exactly 64 hex characters (a 32-byte Ed25519 seed)", arcpay.ErrViolation, resolved)
 	}
 	return ed25519.NewKeyFromSeed(seed), nil
 }

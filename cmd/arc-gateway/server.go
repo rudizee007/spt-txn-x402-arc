@@ -57,6 +57,7 @@ type server struct {
 	settle  settleFunc
 	persist func() error // persist the log and the payment count after every decision (§6)
 	onEntry func()       // called after every recorded decision (checkpoints, §5)
+	entered bool         // a decision was recorded by the call being answered
 	now     func() time.Time
 	used    *int // ALLOWs issued under this capability; shared with the policy
 	out     io.Writer
@@ -108,7 +109,7 @@ func (s *server) write(v interface{}) {
 	}
 	if _, err := s.out.Write(append(b, '\n')); err != nil {
 		// The client cannot receive the reply. Say so where an operator looks;
-		// the decision is already recorded and persisted.
+		// the decision, if any, is already recorded.
 		_, _ = fmt.Fprintf(s.diag, "protocol write failed: %v\n", err)
 	}
 }
@@ -153,6 +154,14 @@ func (s *server) handle(ctx context.Context, req rpcReq) {
 		reply(s.toolsList())
 	case "tools/call":
 		reply(s.toolsCall(ctx, req.Params))
+		// The checkpoint runs once the reply is written, so it never delays
+		// the answer or a payment toward its expiry (§5).
+		if s.entered {
+			s.entered = false
+			if s.onEntry != nil {
+				s.onEntry()
+			}
+		}
 	case "resources/list":
 		reply(map[string]interface{}{"resources": []interface{}{}})
 	case "prompts/list":
@@ -327,11 +336,7 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 	if r.Allowed() {
 		*s.used++
 	}
-	// The checkpoint runs after this call is answered, never before
-	// settlement, so it cannot delay a payment toward its expiry.
-	if s.onEntry != nil {
-		defer s.onEntry()
-	}
+	s.entered = true
 
 	// §6: the decision and the count are persisted before anything acts on
 	// them. If they cannot be, nothing is settled; an ALLOW's nonce is already
