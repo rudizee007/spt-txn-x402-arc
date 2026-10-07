@@ -49,6 +49,7 @@ import (
 
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm"
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm/arcpay"
+	"github.com/rudizee007/spt-txn-x402-arc/settle/evm/circlewallet"
 )
 
 func main() {
@@ -64,10 +65,15 @@ func main() {
 	evaluateOnly := flag.Bool("evaluate-only", false, "hold no payment key; offer evaluate_payment, which returns the decision and can never settle (refuses -key and -dry-run)")
 	stateDir := flag.String("state-dir", "", "directory for per-capability payment counts and locks, shared by every gateway for a capability (required)")
 	verifyRPC := flag.String("verify-rpc", "", "optional second, independent endpoint; the payer's nonce must agree on both (recommended on mainnet)")
+	var m3f m3Flags
+	m3f.register(flag.CommandLine)
 	flag.Parse()
 
-	mode, err := resolveMode(*evaluateOnly, *dryRun, *keyPath, flag.Args())
+	mode, err := resolveModeM3(*evaluateOnly, *dryRun, *keyPath, flag.Args(), m3f.remote())
 	if err != nil {
+		fatal(err)
+	}
+	if err := m3f.validate(mode); err != nil {
 		fatal(err)
 	}
 	for name, v := range map[string]string{"capability": *capPath, "rpc": *rpcURL,
@@ -89,9 +95,17 @@ func main() {
 	}
 	// In evaluate-only mode no payment key is read at all (§6a).
 	var payKey, cpKey *ecdsa.PrivateKey
-	if mode == modeEvaluate {
+	var wallet *circlewallet.Wallet
+	switch {
+	case mode == modeEvaluate:
 		cpKey, err = arcpay.LoadKey(*cpKeyPath)
-	} else {
+	case m3f.remote():
+		if cpKey, err = arcpay.LoadKey(*cpKeyPath); err == nil {
+			if wallet, err = m3f.loadCircle(); err == nil {
+				err = distinctKeys(wallet.Address(), crypto.PubkeyToAddress(cpKey.PublicKey))
+			}
+		}
+	default:
 		payKey, cpKey, err = loadKeys(*keyPath, *cpKeyPath)
 	}
 	if err != nil {
@@ -99,8 +113,11 @@ func main() {
 	}
 	cpAddr := crypto.PubkeyToAddress(cpKey.PublicKey)
 	payer := "none (evaluate-only: no payment key)"
-	if payKey != nil {
+	switch {
+	case payKey != nil:
 		payer = crypto.PubkeyToAddress(payKey.PublicKey).Hex()
+	case wallet != nil:
+		payer = wallet.Address().Hex() + " (Circle developer-controlled wallet " + m3f.circleWallet + ")"
 	}
 	logKey, err := loadEd25519(*logKeyPath)
 	if err != nil {
@@ -150,8 +167,11 @@ func main() {
 
 	// settle stays nil in evaluate-only mode: there is nothing to settle with.
 	var settle settleFunc
-	if mode != modeEvaluate {
+	if mode != modeEvaluate && (!m3f.on() || m3f.rail == railTransfer) {
 		cfg := arcpay.Config{Net: cap.Net, Client: client, Key: payKey, MaxFeeMicro: *maxFee, Log: os.Stderr}
+		if wallet != nil {
+			cfg.Key, cfg.Remote = nil, wallet
+		}
 		if *verifyRPC != "" {
 			vc, err := ethclient.DialContext(ctx, *verifyRPC)
 			if err != nil {
@@ -185,6 +205,15 @@ func main() {
 		out: os.Stdout, diag: os.Stderr,
 	}
 
+	if m3f.on() {
+		m, err := m3f.buildM3(mode, st.path, log, logKey, cap.Net, payKey, wallet)
+		if err != nil {
+			fatal(err)
+		}
+		defer func() { _ = m.corr.Close() }()
+		s.m3 = m
+	}
+
 	fmt.Fprintln(os.Stderr, "spt-txn arc-gateway ready (stdio).")
 	fmt.Fprintf(os.Stderr, "  network:    %s %s\n", cap.Net.Name, cap.Net.CAIP2)
 	fmt.Fprintf(os.Stderr, "  capability: pay <= %s USDC to %s for %q, at most %d payment(s) (%d used), until %s\n",
@@ -193,6 +222,10 @@ func main() {
 	fmt.Fprintf(os.Stderr, "  mode:       %s (tool %s)\n", mode, s.toolName())
 	fmt.Fprintf(os.Stderr, "  payer:      %s\n  checkpoints from %s every %d decisions\n", payer, cpAddr, *cpEvery)
 	fmt.Fprintf(os.Stderr, "  log key:    %s (%d entries loaded)\n", hex.EncodeToString(logKey.Public().(ed25519.PublicKey)), log.Len())
+	if s.m3 != nil {
+		fmt.Fprintf(os.Stderr, "  M3:         server identity %q, rail %s, signer %s\n", s.m3.identity, s.m3.rail, orNone(m3f.signer))
+		fmt.Fprintf(os.Stderr, "  correlation: %s.correlation (%d records, verified against the log)\n", st.path, s.m3.corr.Len())
+	}
 	switch mode {
 	case modeDryRun:
 		fmt.Fprintln(os.Stderr, "  DRY RUN: the guard runs, nothing is signed or sent")

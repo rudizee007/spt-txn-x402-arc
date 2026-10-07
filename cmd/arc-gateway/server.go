@@ -243,19 +243,26 @@ func (s *server) toolsList() interface{} {
 	if s.toolName() == "" {
 		return map[string]interface{}{"tools": []interface{}{}}
 	}
+	props := map[string]interface{}{
+		"to":          map[string]interface{}{"type": "string", "description": "recipient: a 0x address, or the demo label \"merchant\" or \"attacker\""},
+		"amount_usdc": map[string]interface{}{"type": "string", "description": "amount in USDC as a decimal string, at most 6 decimal places, e.g. \"0.5\" (required; a JSON number or an omitted amount is refused, not treated as zero)"},
+		"resource":    map[string]interface{}{"type": "string", "description": "what is being paid for, e.g. invoice:42"},
+	}
+	required := []interface{}{"to", "amount_usdc", "resource"}
+	if s.m3 != nil {
+		props["payment_id"] = map[string]interface{}{"type": "string", "description": "a fresh 32-byte identifier for this payment, 64 lowercase hex characters; a repeated one is refused"}
+		props["server_identity"] = map[string]interface{}{"type": "string", "description": "this gateway's server identity, exactly: " + s.m3.identity}
+		required = append(required, "payment_id", "server_identity")
+	}
 	return map[string]interface{}{
 		"tools": []interface{}{
 			map[string]interface{}{
 				"name":        s.toolName(),
 				"description": s.toolDescription(),
 				"inputSchema": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"to":          map[string]interface{}{"type": "string", "description": "recipient: a 0x address, or the demo label \"merchant\" or \"attacker\""},
-						"amount_usdc": map[string]interface{}{"type": "string", "description": "amount in USDC as a decimal string, at most 6 decimal places, e.g. \"0.5\" (required; a JSON number or an omitted amount is refused, not treated as zero)"},
-						"resource":    map[string]interface{}{"type": "string", "description": "what is being paid for, e.g. invoice:42"},
-					},
-					"required":             []interface{}{"to", "amount_usdc", "resource"},
+					"type":                 "object",
+					"properties":           props,
+					"required":             required,
 					"additionalProperties": false,
 				},
 			},
