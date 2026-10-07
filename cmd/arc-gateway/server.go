@@ -19,6 +19,7 @@ import (
 	"github.com/rudizee007/spt-txn-pep/gate"
 	"github.com/rudizee007/spt-txn-pep/mcpgate"
 
+	"github.com/rudizee007/spt-txn-x402-arc/intent"
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm"
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm/arcpay"
 )
@@ -61,6 +62,7 @@ type server struct {
 	used    *int // ALLOWs issued under this capability; shared with the policy
 	out     io.Writer
 	diag    io.Writer
+	m3      *m3 // SPEC-ARC-M3 mode; nil runs the M2 gateway unchanged
 }
 
 // countingPolicy is the capability's policy: the approved payment shape
@@ -282,7 +284,11 @@ func (s *server) resolveTo(to string) (evm.Address, error) {
 
 func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interface{} {
 	// SPEC-ARC-M3 §3: one reading of the authorized object, or a refusal.
-	tc, err := parseToolCall(params, []string{"to", "amount_usdc", "resource"})
+	required := []string{"to", "amount_usdc", "resource"}
+	if s.m3 != nil {
+		required = append(required, m3Args...)
+	}
+	tc, err := parseToolCall(params, required)
 	if err != nil {
 		return s.reply("DENY_VIOLATION: "+err.Error(), true)
 	}
@@ -291,6 +297,13 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 	}
 	if tc.Name != s.toolName() {
 		return s.reply("unknown tool: "+tc.Name, true)
+	}
+	var digest intent.Digest
+	var paymentID [32]byte
+	if s.m3 != nil {
+		if digest, paymentID, err = s.m3.precheck(tc); err != nil {
+			return s.reply("DENY_VIOLATION: "+err.Error(), true)
+		}
 	}
 	micro, err := amount.ParseMicro(tc.Args["amount_usdc"])
 	if err != nil {
@@ -342,20 +355,27 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 		return s.reply(fmt.Sprintf("ALLOWED by the SPT-Txn enforcement point (log entry %s). "+
 			"Evaluate-only: this server holds no payment key; nothing was signed or sent.", r.LogEntry), false)
 	}
+	if s.m3 != nil && s.m3.rail == railEIP3009 {
+		return s.reply(s.authorizeEIP3009(ctx, r.LogEntry, digest, paymentID, to, micro, expiry))
+	}
 	if s.settle == nil {
 		return s.reply(fmt.Sprintf("AUTHORIZED (log entry %s), but this server has no settler; nothing was signed or sent.", r.LogEntry), true)
 	}
 
 	// I1: every field below comes from the authorized call, except Recipient,
 	// the approved address, which the settler proves the call names.
-	res, err := s.settle(ctx, arcpay.Payment{
+	payment := arcpay.Payment{
 		Authorization:  r.LogEntry,
 		Recipient:      s.cap.Recipient,
 		PayToTransport: call.To,
 		AssetTransport: call.Asset,
 		AmountMicro:    call.Amount,
 		NotAfter:       call.Expiry,
-	})
+	}
+	if s.m3 != nil {
+		payment.BeforeSign = s.m3.beforeSign(r.LogEntry, digest, paymentID)
+	}
+	res, err := s.settle(ctx, payment)
 	if err != nil {
 		_, _ = fmt.Fprintf(s.diag, "settlement after ALLOW %s failed: %v\n", r.LogEntry, err)
 		return s.reply(fmt.Sprintf("AUTHORIZED (log entry %s), but settlement did not complete: %s",

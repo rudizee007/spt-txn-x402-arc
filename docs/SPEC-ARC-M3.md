@@ -555,7 +555,7 @@ domain-separated encoding (no JSON, so there is nothing to canonicalize):
 | intent_digest | 32 | raw intent digest (§6) |
 | payment_id | 32 | raw `payment_id` |
 | target_hash | 32 | SHA-256 of the configured server identity |
-| rail | 1 | `0x01` EIP-3009, `0x02` Circle Wallets transaction (further values per rail) |
+| rail | 1 | `0x01` EIP-3009, `0x02` Circle Wallets transaction, `0x03` local-key transaction (further values per rail) |
 | guarded_id | 32 | EIP-3009: the EIP-712 digest that is signed. Transaction: the EIP-1559 signing hash |
 | prev_hash | 32 | SHA-256 of the previous record's encoding, or 32 zero bytes for the first |
 

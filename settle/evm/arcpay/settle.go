@@ -77,6 +77,10 @@ type Payment struct {
 	// signature, so a slow or hostile endpoint cannot choose to have the
 	// payment signed after the authorization has lapsed. Zero is refused.
 	NotAfter time.Time
+	// BeforeSign, if set, runs after the pre-sign guard passes and before
+	// anything is signed, with the transaction's EIP-1559 signing hash. An error
+	// stops the payment unsigned (the correlation record, SPEC-ARC-M3 §6.3).
+	BeforeSign func(signingHash common.Hash) error
 }
 
 // Config is everything Settle needs that is not part of the payment.
@@ -86,11 +90,7 @@ type Config struct {
 	Key    *ecdsa.PrivateKey
 	// Remote, instead of Key, signs through a wallet provider (SPEC-ARC-M3 §4.2).
 	// Exactly one of Key and Remote is set.
-	Remote RemoteSigner
-	// BeforeSign, if set, runs after the pre-sign guard passes and before
-	// anything is signed, with the transaction's EIP-1559 signing hash. An error
-	// stops the payment unsigned (the correlation record, SPEC-ARC-M3 §6.3).
-	BeforeSign     func(signingHash common.Hash) error
+	Remote         RemoteSigner
 	MaxFeeMicro    uint64        // ceiling on the whole fee, micro-USDC
 	ConfirmTimeout time.Duration // 0 means DefaultConfirmTimeout
 	Log            io.Writer     // progress lines; nil means discard
@@ -360,8 +360,8 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 		say("dry run:   stopping before the signature, as asked.\n")
 		return Result{SigningHash: signingHash, Payer: payer}, nil
 	}
-	if cfg.BeforeSign != nil {
-		if err := cfg.BeforeSign(signingHash); err != nil {
+	if p.BeforeSign != nil {
+		if err := p.BeforeSign(signingHash); err != nil {
 			return Result{}, unavailable(fmt.Errorf("before signing: %w; nothing was signed", err))
 		}
 	}

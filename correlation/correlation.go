@@ -51,6 +51,7 @@ const (
 const (
 	RailEIP3009         byte = 0x01
 	RailCircleWalletsTx byte = 0x02
+	RailLocalKeyTx      byte = 0x03
 )
 
 // Errors.

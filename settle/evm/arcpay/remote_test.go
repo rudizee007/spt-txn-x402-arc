@@ -124,7 +124,7 @@ func TestUnsignedBytesHashToTheSigningHash(t *testing.T) {
 func TestRemote_HonestProviderSettlesThroughTheGuard(t *testing.T) {
 	prov, cfg, p, sent := remoteSetup(t)
 	var hookHash common.Hash
-	cfg.BeforeSign = func(h common.Hash) error { hookHash = h; return nil }
+	p.BeforeSign = func(h common.Hash) error { hookHash = h; return nil }
 	res, err := Settle(context.Background(), cfg, p)
 	if err != nil {
 		t.Fatalf("honest remote settlement failed: %v", err)
@@ -205,7 +205,7 @@ func TestRemote_ProviderNeverSeesARefusedPayment(t *testing.T) {
 		t.Fatalf("tampered plan: err=%v calls=%d broadcasts=%d", err, prov.calls, sent())
 	}
 	prov2, cfg2, p2, sent2 := remoteSetup(t)
-	cfg2.BeforeSign = func(common.Hash) error { return errors.New("correlation file not writable") }
+	p2.BeforeSign = func(common.Hash) error { return errors.New("correlation file not writable") }
 	_, err = Settle(context.Background(), cfg2, p2)
 	if !errors.Is(err, ErrUnavailable) || prov2.calls != 0 || sent2() != 0 {
 		t.Fatalf("BeforeSign failure: err=%v calls=%d broadcasts=%d", err, prov2.calls, sent2())
