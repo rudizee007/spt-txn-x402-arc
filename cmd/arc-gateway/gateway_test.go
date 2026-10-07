@@ -83,7 +83,7 @@ func newTestServer(enf authorizer, settle settleFunc, used *int) *server {
 func call(s *server, to, amount, resource string) (string, bool) {
 	args := map[string]interface{}{"to": to, "resource": resource}
 	if amount != "" {
-		args["amount_usdc"] = json.Number(amount)
+		args["amount_usdc"] = amount
 	}
 	params, _ := json.Marshal(map[string]interface{}{"name": s.toolName(), "arguments": args})
 	res := s.toolsCall(context.Background(), params).(map[string]interface{})

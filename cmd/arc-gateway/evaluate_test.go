@@ -68,7 +68,7 @@ func TestEvaluateOnlyOffersOnlyTheSideEffectFreeTool(t *testing.T) {
 		t.Fatalf("evaluate-only tools/list: %s", list)
 	}
 	params, _ := json.Marshal(map[string]interface{}{"name": "authorize_payment",
-		"arguments": map[string]interface{}{"to": "merchant", "amount_usdc": json.Number("0.5"), "resource": "invoice:42"}})
+		"arguments": map[string]interface{}{"to": "merchant", "amount_usdc": "0.5", "resource": "invoice:42"}})
 	res := s.toolsCall(context.Background(), params).(map[string]interface{})
 	text := res["content"].([]interface{})[0].(map[string]interface{})["text"].(string)
 	if !res["isError"].(bool) || !strings.Contains(text, "unknown tool") {
@@ -139,7 +139,7 @@ func TestReplyStatesCheckpoints(t *testing.T) {
 
 func callNamed(s *server, name string) (string, bool) {
 	params, _ := json.Marshal(map[string]interface{}{"name": name,
-		"arguments": map[string]interface{}{"to": "merchant", "amount_usdc": json.Number("0.5"), "resource": "invoice:42"}})
+		"arguments": map[string]interface{}{"to": "merchant", "amount_usdc": "0.5", "resource": "invoice:42"}})
 	res := s.toolsCall(context.Background(), params).(map[string]interface{})
 	return res["content"].([]interface{})[0].(map[string]interface{})["text"].(string), res["isError"].(bool)
 }

@@ -536,7 +536,7 @@ func TestCheckpointRunsAfterTheReply(t *testing.T) {
 	s.out = &out
 	written := -1
 	s.onEntry = func() { written = out.Len() }
-	params := []byte(`{"name":"authorize_payment","arguments":{"to":"attacker","amount_usdc":0.5,"resource":"invoice:42"}}`)
+	params := []byte(`{"name":"authorize_payment","arguments":{"to":"attacker","amount_usdc":"0.5","resource":"invoice:42"}}`)
 	s.handle(context.Background(), rpcReq{JSONRPC: "2.0", ID: []byte("1"), Method: "tools/call", Params: params})
 	if written <= 0 {
 		t.Fatalf("checkpoint ran before the reply was written (reply bytes seen: %d)", written)
@@ -734,7 +734,7 @@ func TestCheckpointOnlyAfterARecordedDecision(t *testing.T) {
 	s := newTestServer(realEnforcer(t, testCap, &used, func() time.Time { return t0 }), nil, &used)
 	runs := 0
 	s.onEntry = func() { runs++ }
-	recorded := []byte(`{"name":"authorize_payment","arguments":{"to":"attacker","amount_usdc":0.5,"resource":"invoice:42"}}`)
+	recorded := []byte(`{"name":"authorize_payment","arguments":{"to":"attacker","amount_usdc":"0.5","resource":"invoice:42"}}`)
 	noAmount := []byte(`{"name":"authorize_payment","arguments":{"to":"merchant","resource":"invoice:42"}}`)
 	s.handle(context.Background(), rpcReq{JSONRPC: "2.0", ID: []byte("1"), Method: "tools/call", Params: recorded})
 	if runs != 1 {

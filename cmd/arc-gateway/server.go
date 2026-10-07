@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -251,10 +250,11 @@ func (s *server) toolsList() interface{} {
 					"type": "object",
 					"properties": map[string]interface{}{
 						"to":          map[string]interface{}{"type": "string", "description": "recipient: a 0x address, or the demo label \"merchant\" or \"attacker\""},
-						"amount_usdc": map[string]interface{}{"type": "number", "description": "amount in USDC, at most 6 decimal places (required; an omitted amount is refused, not treated as zero)"},
+						"amount_usdc": map[string]interface{}{"type": "string", "description": "amount in USDC as a decimal string, at most 6 decimal places, e.g. \"0.5\" (required; a JSON number or an omitted amount is refused, not treated as zero)"},
 						"resource":    map[string]interface{}{"type": "string", "description": "what is being paid for, e.g. invoice:42"},
 					},
-					"required": []interface{}{"to", "amount_usdc", "resource"},
+					"required":             []interface{}{"to", "amount_usdc", "resource"},
+					"additionalProperties": false,
 				},
 			},
 		},
@@ -281,35 +281,22 @@ func (s *server) resolveTo(to string) (evm.Address, error) {
 }
 
 func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interface{} {
-	var p struct {
-		Name      string `json:"name"`
-		Arguments struct {
-			To string `json:"to"`
-			// json.Number keeps the caller's digits; the pointer separates an
-			// absent amount from zero (see spt-txn-pep/amount).
-			AmountUSDC *json.Number `json:"amount_usdc"`
-			Resource   string       `json:"resource"`
-		} `json:"arguments"`
-	}
-	dec := json.NewDecoder(bytes.NewReader(params))
-	dec.UseNumber()
-	if err := dec.Decode(&p); err != nil {
-		return s.reply("invalid tool arguments", true)
+	// SPEC-ARC-M3 §3: one reading of the authorized object, or a refusal.
+	tc, err := parseToolCall(params, []string{"to", "amount_usdc", "resource"})
+	if err != nil {
+		return s.reply("DENY_VIOLATION: "+err.Error(), true)
 	}
 	if s.toolName() == "" {
 		return s.reply("DENY_UNAVAILABLE: this server has no valid mode and refuses every call", true)
 	}
-	if p.Name != s.toolName() {
-		return s.reply("unknown tool: "+p.Name, true)
+	if tc.Name != s.toolName() {
+		return s.reply("unknown tool: "+tc.Name, true)
 	}
-	if p.Arguments.AmountUSDC == nil {
-		return s.reply("DENY_VIOLATION: amount_usdc is required; an omitted amount is not a zero amount", true)
-	}
-	micro, err := amount.ParseMicro(string(*p.Arguments.AmountUSDC))
+	micro, err := amount.ParseMicro(tc.Args["amount_usdc"])
 	if err != nil {
 		return s.reply("DENY_VIOLATION: "+err.Error(), true)
 	}
-	to, err := s.resolveTo(p.Arguments.To)
+	to, err := s.resolveTo(tc.Args["to"])
 	if err != nil {
 		return s.reply("DENY_VIOLATION: recipient: "+err.Error(), true)
 	}
@@ -326,7 +313,7 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 		To:       evm.AccountIDBase58(to),
 		Asset:    evm.AccountIDBase58(s.cap.Net.USDC),
 		Amount:   strconv.FormatUint(micro, 10),
-		Resource: p.Arguments.Resource,
+		Resource: tc.Args["resource"],
 		Nonce:    nonce,
 		Expiry:   expiry,
 	}
