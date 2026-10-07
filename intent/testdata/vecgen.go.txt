@@ -1,0 +1,201 @@
+// Vector generator: runs the public reference canonicalizer and intent digest.
+package main
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"math/rand"
+	"os"
+	"strings"
+
+	"github.com/rudizee007/spt-txn-poc/internal/intent"
+	"github.com/rudizee007/spt-txn-poc/pkg/jcs"
+)
+
+type jv struct {
+	Name      string `json:"name"`
+	Input     string `json:"input_b64"`
+	Canonical string `json:"canonical_b64,omitempty"`
+	Refused   bool   `json:"refused,omitempty"`
+}
+
+type iv struct {
+	Name      string  `json:"name"`
+	Tool      string  `json:"tool"`
+	Target    string  `json:"target"`
+	Arguments *string `json:"arguments_b64"`
+	Digest    string  `json:"digest,omitempty"`
+	Refused   bool    `json:"refused,omitempty"`
+}
+
+func b64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+
+func jcsVec(name string, in []byte) jv {
+	out, err := jcs.CanonicalizeRaw(in)
+	if err != nil {
+		return jv{Name: name, Input: b64(in), Refused: true}
+	}
+	return jv{Name: name, Input: b64(in), Canonical: b64(out)}
+}
+
+func nest(open, close string, n int, inner string) string {
+	return strings.Repeat(open, n) + inner + strings.Repeat(close, n)
+}
+
+func main() {
+	hand := []struct{ n, s string }{
+		{"empty object", `{}`}, {"empty array", `[]`}, {"whitespace everywhere", " \t\n{ \"b\" : [ 1 , 2 ] ,\r\n \"a\" : { } } \n"},
+		{"literals", `[true,false,null]`}, {"top-level string", `"x"`}, {"top-level integer", `7`},
+		{"order: ascii", `{"b":1,"a":2,"aa":3,"A":4,"_":5,"1":6}`},
+		{"order: BMP private use vs non-BMP", `{"":1,"😀":2}`},
+		{"order: U+FFFF vs U+10000", "{\"￿\":1,\"\U00010000\":2}"},
+		{"order: prefix", `{"ab":1,"a":2,"":3}`},
+		{"order: nested objects", `{"z":{"y":1,"x":2},"a":[{"d":1,"c":2}]}`},
+		{"escape: quote and backslash", `["\"","\\"]`},
+		{"escape: two-char controls", `["\b\f\n\r\t"]`},
+		{"escape: other C0 controls", `["\u0000\u0001\u001f\u000b"]`},
+		{"escape: solidus escaped in input", `["\/"]`}, {"escape: solidus literal", `["/"]`},
+		{"escape: DEL", "[\"\u007f\"]"},
+		{"escape: U+2028 and U+2029 escaped", `["  "]`}, {"escape: U+2028 literal", "[\" \"]"},
+		{"escape: escaped ASCII letters", `["Ab"]`},
+		{"escape: HTML characters", `["<>&'"]`}, {"escape: HTML characters escaped", `["<>&"]`},
+		{"unicode: non-ASCII literal", `["café ü ß 日本"]`}, {"unicode: surrogate pair escaped", `["😀"]`},
+		{"unicode: non-BMP literal", `["😀𝄞"]`}, {"unicode: combining mark not normalized", "[\"é\",\"é\"]"},
+		{"refuse: U+FFFD literal", "[\"�\"]"}, {"refuse: U+FFFD escaped", `["�"]`},
+		{"refuse: lone high surrogate", `["\ud800"]`}, {"refuse: lone low surrogate", `["\udc00"]`},
+		{"refuse: invalid UTF-8 byte", "[\"\xff\"]"}, {"refuse: overlong UTF-8", "[\"\xc0\xaf\"]"},
+		{"refuse: invalid UTF-8 in key", "{\"\xfe\":1}"},
+		{"int: zero", `0`}, {"int: negative", `-1`}, {"int: max", `9007199254740991`}, {"int: min", `-9007199254740991`},
+		{"refuse int: max+1", `9007199254740992`}, {"refuse int: min-1", `-9007199254740992`},
+		{"refuse int: huge", `123456789012345678901234567890`},
+		{"refuse number: negative zero", `-0`}, {"refuse number: fraction", `1.5`}, {"refuse number: integral fraction", `1.0`},
+		{"refuse number: exponent", `1e3`}, {"refuse number: exponent upper", `1E2`}, {"refuse number: leading zero", `01`},
+		{"refuse number: plus", `+1`}, {"refuse number: NaN", `NaN`}, {"refuse number: in object", `{"a":0.1}`},
+		{"refuse: duplicate member", `{"a":1,"a":1}`}, {"refuse: duplicate member nested", `{"x":{"a":1,"a":2}}`},
+		{"refuse: duplicate after escape", `{"a":1,"a":2}`},
+		{"refuse: trailing value", `{} {}`}, {"refuse: trailing garbage", `{}x`}, {"refuse: truncated", `{"a":`},
+		{"refuse: empty input", ``}, {"refuse: trailing comma", `[1,]`}, {"refuse: single quotes", `{'a':1}`},
+		{"depth: 64 arrays", nest("[", "]", 64, "")}, {"depth: 65 arrays", nest("[", "]", 65, "")}, {"depth: 66 arrays", nest("[", "]", 66, "")},
+		{"depth: 64 objects", nest(`{"a":`, "}", 64, "1")}, {"depth: 65 objects", nest(`{"a":`, "}", 65, "1")},
+		{"payment arguments", `{"to":"0x79A34Cc563f848f626038Ff312CCEBfb5374971d","amount_usdc":"0.5","resource":"invoice:42","payment_id":"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff","server_identity":"arc-gateway-testnet"}`},
+	}
+	var jvs []jv
+	for _, h := range hand {
+		jvs = append(jvs, jcsVec(h.n, []byte(h.s)))
+	}
+	r := rand.New(rand.NewSource(20261007))
+	for i := 0; i < 300; i++ {
+		jvs = append(jvs, jcsVec(fmt.Sprintf("random %03d", i), []byte(randValue(r, 0))))
+	}
+
+	args := func(s string) *string { v := b64([]byte(s)); return &v }
+	ivIn := []struct {
+		n, tool, target string
+		a               *string
+	}{
+		{"payment", "authorize_payment", "arc-gateway-testnet", args(`{"to":"merchant","amount_usdc":"0.5","resource":"invoice:42"}`)},
+		{"payment, whitespace and order differ", "authorize_payment", "arc-gateway-testnet", args(" {\"resource\" : \"invoice:42\", \"amount_usdc\":\"0.5\",\"to\":\"merchant\"} ")},
+		{"payment, re-encoded by the enforcement point", "authorize_payment", "arc-gateway-testnet", args(`{"resource":"a<b>&c","amount_usdc":"0.5","to":"merchant"}`)},
+		{"payment, HTML literal", "authorize_payment", "arc-gateway-testnet", args(`{"resource":"a<b>&c","amount_usdc":"0.5","to":"merchant"}`)},
+		{"absent arguments bind as empty object", "ping", "srv", nil},
+		{"empty arguments object", "ping", "srv", args(`{}`)},
+		{"unicode tool and target", "pay-€", "ziel-😀", args(`{"k":"v"}`)},
+		{"target with quote and control", "t", "a\"b\n", args(`{"k":1}`)},
+		{"integer argument", "t", "srv", args(`{"n":9007199254740991}`)},
+		{"refuse: empty tool", "", "srv", args(`{}`)},
+		{"refuse: empty target", "t", "", args(`{}`)},
+		{"refuse: arguments not an object", "t", "srv", args(`["a"]`)},
+		{"refuse: arguments a string", "t", "srv", args(`"a"`)},
+		{"refuse: non-integer argument", "t", "srv", args(`{"amount":0.5}`)},
+		{"refuse: duplicate argument", "t", "srv", args(`{"a":1,"a":2}`)},
+		{"refuse: tool with U+FFFD", "t�", "srv", args(`{}`)},
+	}
+	var ivs []iv
+	for _, x := range ivIn {
+		var raw json.RawMessage
+		if x.a != nil {
+			b, _ := base64.StdEncoding.DecodeString(*x.a)
+			raw = b
+		}
+		d, err := intent.Intent{Tool: x.tool, Params: raw, Target: x.target}.Digest()
+		v := iv{Name: x.n, Tool: x.tool, Target: x.target, Arguments: x.a}
+		if err != nil {
+			v.Refused = true
+		} else {
+			v.Digest = d
+		}
+		ivs = append(ivs, v)
+	}
+	out := map[string]any{
+		"source":  "generated by running the public reference implementation: github.com/rudizee007/spt-txn-poc pkg/jcs (CanonicalizeRaw) and internal/intent (Intent.Digest)",
+		"jcs":     jvs,
+		"intent":  ivs,
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", " ")
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(out); err != nil {
+		panic(err)
+	}
+}
+
+var runesPool = []rune{'a', 'Z', '0', ' ', '"', '\\', '/', '\b', '\f', '\n', '\r', '\t', 0x00, 0x01, 0x1f, 0x7f, 0x80, 0xe9, 0x2028, 0x2029, 0x3042, 0xe000, 0xfeff, 0xffff, 0x10000, 0x1f600, 0x10ffff, '<', '>', '&', 0xfffd}
+
+func randString(r *rand.Rand) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	n := r.Intn(6)
+	for i := 0; i < n; i++ {
+		c := runesPool[r.Intn(len(runesPool))]
+		switch {
+		case c == '"' || c == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(c)
+		case c < 0x20 || r.Intn(4) == 0:
+			if c > 0xffff {
+				c -= 0x10000
+				fmt.Fprintf(&b, `\u%04x\u%04x`, 0xd800+(c>>10), 0xdc00+(c&0x3ff))
+			} else {
+				fmt.Fprintf(&b, `\u%04x`, c)
+			}
+		default:
+			b.WriteRune(c)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func ws(r *rand.Rand) string { return []string{"", "", " ", "\n", "\t ", "\r\n"}[r.Intn(6)] }
+
+func randValue(r *rand.Rand, depth int) string {
+	k := r.Intn(10)
+	if depth > 3 {
+		k = r.Intn(6)
+	}
+	switch k {
+	case 0:
+		return randString(r)
+	case 1:
+		return []string{"0", "-1", "42", "9007199254740991", "-9007199254740991", "9007199254740992", "1.5", "1e2", "-0", "07"}[r.Intn(10)]
+	case 2:
+		return []string{"true", "false", "null"}[r.Intn(3)]
+	case 3, 4, 5:
+		return randString(r)
+	case 6, 7:
+		n := r.Intn(4)
+		parts := make([]string, n)
+		for i := range parts {
+			parts[i] = ws(r) + randValue(r, depth+1) + ws(r)
+		}
+		return "[" + strings.Join(parts, ",") + "]"
+	default:
+		n := r.Intn(5)
+		parts := make([]string, n)
+		for i := range parts {
+			parts[i] = ws(r) + randString(r) + ws(r) + ":" + ws(r) + randValue(r, depth+1)
+		}
+		return "{" + strings.Join(parts, ",") + "}"
+	}
+}

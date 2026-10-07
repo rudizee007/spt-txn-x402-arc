@@ -1,0 +1,24 @@
+{
+ "source": "computed with Python hashlib, independently of the Go implementation",
+ "tag": "spt-txn-eip3009-nonce-v1",
+ "vectors": [
+  {
+   "intent_digest_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+   "intent_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "preimage_hex": "7370742d74786e2d656970333030392d6e6f6e63652d7631000000000000000000000000000000000000000000000000000000000000000000",
+   "nonce_hex": "f4ddd4746cd2bcdd4d0a0961bcd9d31a9ffee50b155378436a8786c78d5d05b4"
+  },
+  {
+   "intent_digest_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+   "intent_digest": "__________________________________________8",
+   "preimage_hex": "7370742d74786e2d656970333030392d6e6f6e63652d763100ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+   "nonce_hex": "603935c836b2e5c33f627a18e94601e05934774b8ff7f90f9eb0e212ad776550"
+  },
+  {
+   "intent_digest_hex": "3a9f1c0e5b7d2468ace013579bdf02468ace13579bdf0246813579bdf02468ac",
+   "intent_digest": "Op8cDlt9JGis4BNXm98CRorOE1eb3wJGgTV5vfAkaKw",
+   "preimage_hex": "7370742d74786e2d656970333030392d6e6f6e63652d7631003a9f1c0e5b7d2468ace013579bdf02468ace13579bdf0246813579bdf02468ac",
+   "nonce_hex": "f7ca6f70f2bfc83cefaff0d9feb0217e6257b9c52ab741c6d5bf232d9d256f8e"
+  }
+ ]
+}
