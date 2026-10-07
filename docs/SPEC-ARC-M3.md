@@ -270,9 +270,20 @@ validBefore > validAfter
 
 The capability expiry and the call expiry are the ones the gateway already
 enforces (`SPEC-ARC-GATE.md` I5). The maximum authorization lifetime is a
-required setting, and startup refuses zero or negative values. "The
-authorization's own expiry" in C6 therefore means, in M3, the expiry of the
-gateway's authorization: the capability and the call.
+required setting.
+
+Two different lower bounds apply, and they must not be confused:
+
+- **Protocol-side (observed, V-1):** the x402 reference facilitator refuses an
+  authorization whose `validBefore` is less than 6 seconds after the moment it
+  verifies it.
+- **Operational (ours):** startup refuses `-max-auth-lifetime` below **30
+  seconds**. This is this gateway's margin over the facilitator's 6 seconds for
+  the time an authorization spends between signing and verification. It is not
+  an x402 requirement, and it changes only on evidence.
+
+"The authorization's own expiry" in C6 therefore means, in M3, the expiry of
+the gateway's authorization: the capability and the call.
 
 What this does not claim: the enforcement point removes the token before the call
 reaches the gateway, so the gateway does not know the token's expiry. An argument
@@ -329,7 +340,10 @@ itself never appears as the nonce (M8).
 4. Decode the returned signed transaction. Recover the sender and re-run the
    assertions on the decoded transaction. Require the recovered sender to equal the
    bound payer, and every field to be identical to step 1 (`Verified.AssertSame`).
-   Require the returned transaction hash to equal the hash computed locally.
+   If the provider reports a transaction hash, require it to equal the hash
+   computed locally. The provider's hash is optional (owner ruling under V-3):
+   the locally computed hash of the decoded, re-checked transaction is the
+   authoritative one for evidence and broadcast.
 5. Broadcast the guard-checked bytes through the gateway's own RPC connection
    only if step 4 passed. A provider-side broadcast is never relied on.
 
@@ -652,10 +666,10 @@ Following the submitted success metric:
 
 | Id | Assumption | Source so far | Status |
 |---|---|---|---|
-| V-1 | x402 `exact` EVM = EIP-3009 `TransferWithAuthorization`; `extra` carries `name`, `version` | x402 scheme description (to be pinned to a version) | open |
-| V-2 | Arc USDC implements EIP-3009 and EIP-2612; domain values per network | `circlefin/arc-node` `6e76402` ABI | ABI confirmed; domain values open |
-| V-3 | `signTransaction` for EVM: hex in; `signature`, `signedTransaction`, `txHash` out; no broadcast; `ARC`/`ARC-TESTNET` ids | `circlefin/skills` `58ab864` (secondary) | to confirm against the API reference |
-| V-4 | Wallet types allowed to sign raw transactions on Arc (C4) | not stated in sources reached | **week one** |
+| V-1 | x402 `exact` EVM = EIP-3009 `TransferWithAuthorization`; `extra` carries `name`, `version` | `x402-foundation/x402` @ `7f2b2f1f77fa5317615735e3378a6fad41cccb4e` (2026-10-07): `specs/schemes/exact/scheme_exact_evm.md`, `go/mechanisms/evm/exact/facilitator/eip3009.go` | **RESOLVED**: matches; facilitator requires `validBefore ≥ now+6 s` at verification, `validAfter ≤ now`, exact `value` and `to`; reference client uses `validAfter = 0` |
+| V-2 | Arc USDC implements EIP-3009 and EIP-2612; domain values per network | `circlefin/arc-node` @ `6e76402` genesis and artifacts | **provisional** (repository/genesis only): mainnet `name` "USDC", `version` "2"; testnet `name` "USDC", `version` not confirmed from code (implementation matches no shipped artifact). **Live on-chain reads required before any testnet signing; a mismatch blocks signing.** |
+| V-3 | Circle sign-transaction / sign-typed-data request and response | Circle's published SDK `@circle-fin/developer-controlled-wallets@10.8.1` (generated from Circle's OpenAPI) — supporting evidence only | **OPEN**: Circle's primary documentation not yet reachable. `txHash` handled as optional (owner ruling); no other client changes until resolved |
+| V-4 | Whether `ARC`/`ARC-TESTNET` wallets can raw-sign; which account types; EOA required; `EVM` vs `ARC` identifiers; typed-data support for the intended wallet | SDK description lists sign-transaction for `SOL`, `SOL-DEVNET`, `NEAR`, `NEAR-TESTNET`, `EVM`, `EVM-TESTNET` only | **OPEN, HIGH RISK**: raw signing on Arc not assumed. If unsupported but typed data is, the Circle success path is the guarded EIP-3009 authorization (C4 fallback); the guard is not weakened |
 | V-5 | Gateway `BurnIntent` / `TransferSpec` layout | `circlefin/evm-gateway-contracts` `c21d2d2` | confirmed at that commit |
 | V-6 | Gateway domain has no `chainId` / `verifyingContract` | same | confirmed at that commit |
 | V-7 | Nanopayment signed-message format | not confirmed | open |

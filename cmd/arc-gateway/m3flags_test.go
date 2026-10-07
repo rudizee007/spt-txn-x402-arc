@@ -207,3 +207,41 @@ func TestToolsListAdvertisesTheM3Arguments(t *testing.T) {
 		}
 	}
 }
+
+// The operational minimum for -max-auth-lifetime (30 s), at its boundary.
+func TestMaxAuthLifetimeMinimum(t *testing.T) {
+	if minAuthLifetime != 30*time.Second {
+		t.Fatalf("minimum is %s; a change needs evidence and a spec update", minAuthLifetime)
+	}
+	for _, c := range []struct {
+		d  time.Duration
+		ok bool
+	}{
+		{0, false},
+		{time.Nanosecond, false},
+		{6 * time.Second, false}, // the facilitator's own figure is not our minimum
+		{29 * time.Second, false},
+		{30*time.Second - time.Nanosecond, false},
+		{30 * time.Second, true},
+		{30*time.Second + time.Nanosecond, true},
+		{31 * time.Second, true},
+		{2 * time.Minute, true},
+		{-30 * time.Second, false},
+	} {
+		f := goodEIP()
+		f.maxLife = c.d
+		err := f.validate(modeLive)
+		if c.ok && err != nil {
+			t.Errorf("%s refused: %v", c.d, err)
+		}
+		if !c.ok && !errors.Is(err, arcpay.ErrViolation) {
+			t.Errorf("%s accepted", c.d)
+		}
+	}
+	// The message must not present 30 s as an x402 rule.
+	f := goodEIP()
+	f.maxLife = 29 * time.Second
+	if err := f.validate(modeLive); err == nil || !strings.Contains(err.Error(), "operational minimum") || strings.Contains(err.Error(), "x402 requires") {
+		t.Fatalf("message: %v", err)
+	}
+}

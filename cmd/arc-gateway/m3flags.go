@@ -30,6 +30,20 @@ import (
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm/circlewallet"
 )
 
+// minAuthLifetime is this gateway's OPERATIONAL minimum for
+// -max-auth-lifetime on the EIP-3009 rail. It is not an x402 protocol value.
+//
+// The protocol-side requirement is different and smaller: the x402 reference
+// facilitator (x402-foundation/x402 @ 7f2b2f1,
+// go/mechanisms/evm/exact/facilitator/eip3009.go) refuses an authorization
+// whose validBefore is less than 6 seconds after the moment it verifies it.
+// An authorization also has to travel from this gateway, through the agent and
+// the resource server, to the facilitator before that check runs. 30 seconds
+// is our safety margin over the 6 for that journey, so a signed authorization
+// is not already unusable when it arrives. Change it on evidence, not to make
+// a test pass.
+const minAuthLifetime = 30 * time.Second
+
 // m3Flags are the SPEC-ARC-M3 startup settings. M3 mode is on exactly when
 // -server-identity is given; every other M3 flag without it is refused, so a
 // half-configured M3 gateway cannot start as an M2 one.
@@ -52,7 +66,7 @@ func (f *m3Flags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.identity, "server-identity", "", "SPEC-ARC-M3: the enforcement point's configured server identity (target); turns on M3 mode")
 	fs.StringVar(&f.rail, "rail", "", "M3 rail: transfer (ERC-20 transfer, settled here) or eip3009 (x402 exact authorization, submitted by a facilitator)")
 	fs.StringVar(&f.signer, "signer", "", "M3 signer: key (-key) or circle (a Circle developer-controlled wallet)")
-	fs.DurationVar(&f.maxLife, "max-auth-lifetime", 0, "eip3009: maximum authorization lifetime, e.g. 2m (required for -rail eip3009)")
+	fs.DurationVar(&f.maxLife, "max-auth-lifetime", 0, "eip3009: maximum authorization lifetime, at least 30s (an operational minimum, not an x402 value), e.g. 2m (required for -rail eip3009)")
 	fs.StringVar(&f.domainName, "eip3009-domain-name", "", "eip3009: the USDC contract's pinned EIP-712 domain name")
 	fs.StringVar(&f.domainVersion, "eip3009-domain-version", "", "eip3009: the USDC contract's pinned EIP-712 domain version")
 	fs.StringVar(&f.circleBaseURL, "circle-base-url", circlewallet.DefaultBaseURL, "circle: API base URL (https)")
@@ -97,8 +111,10 @@ func (f *m3Flags) validate(mode string) error {
 		return fmt.Errorf("%w: -signer must be key or circle", arcpay.ErrViolation)
 	}
 	if f.rail == railEIP3009 {
-		if f.maxLife <= 0 {
-			return fmt.Errorf("%w: -rail eip3009 needs a positive -max-auth-lifetime", arcpay.ErrViolation)
+		if f.maxLife < minAuthLifetime {
+			return fmt.Errorf("%w: -max-auth-lifetime %s is below this gateway's operational minimum of %s "+
+				"(our margin over the facilitator's need for validBefore to be at least 6 s ahead when it verifies)",
+				arcpay.ErrViolation, f.maxLife, minAuthLifetime)
 		}
 		if f.domainName == "" || f.domainVersion == "" {
 			return fmt.Errorf("%w: -rail eip3009 needs the pinned -eip3009-domain-name and -eip3009-domain-version", arcpay.ErrViolation)
