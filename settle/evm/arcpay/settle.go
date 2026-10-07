@@ -81,9 +81,16 @@ type Payment struct {
 
 // Config is everything Settle needs that is not part of the payment.
 type Config struct {
-	Net            evm.ArcNetwork
-	Client         *ethclient.Client
-	Key            *ecdsa.PrivateKey
+	Net    evm.ArcNetwork
+	Client *ethclient.Client
+	Key    *ecdsa.PrivateKey
+	// Remote, instead of Key, signs through a wallet provider (SPEC-ARC-M3 §4.2).
+	// Exactly one of Key and Remote is set.
+	Remote RemoteSigner
+	// BeforeSign, if set, runs after the pre-sign guard passes and before
+	// anything is signed, with the transaction's EIP-1559 signing hash. An error
+	// stops the payment unsigned (the correlation record, SPEC-ARC-M3 §6.3).
+	BeforeSign     func(signingHash common.Hash) error
 	MaxFeeMicro    uint64        // ceiling on the whole fee, micro-USDC
 	ConfirmTimeout time.Duration // 0 means DefaultConfirmTimeout
 	Log            io.Writer     // progress lines; nil means discard
@@ -96,10 +103,13 @@ type Config struct {
 
 // Result describes a settled payment.
 type Result struct {
-	TxHash  common.Hash
-	Block   uint64
-	GasUsed uint64
-	Payer   common.Address
+	// SigningHash is the EIP-1559 signing hash of the guarded transaction, known
+	// before any signature exists.
+	SigningHash common.Hash
+	TxHash      common.Hash
+	Block       uint64
+	GasUsed     uint64
+	Payer       common.Address
 }
 
 // Demo holds cmd/payarc's demonstration hooks. Settle never sets it; only
@@ -177,8 +187,14 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if cfg.Client == nil || cfg.Key == nil || cfg.Net.ChainID == 0 {
+	if cfg.Client == nil || (cfg.Key == nil && cfg.Remote == nil) || cfg.Net.ChainID == 0 {
 		return Result{}, unavailable(ErrMissingConfig)
+	}
+	if cfg.Key != nil && cfg.Remote != nil {
+		return Result{}, violation(fmt.Errorf("%w: both a local key and a remote signer are configured", ErrMissingConfig))
+	}
+	if cfg.Remote != nil && d.DecoyKey != nil {
+		return Result{}, violation(fmt.Errorf("%w: a decoy key applies only to a local key", ErrMissingConfig))
 	}
 	if cfg.MaxFeeMicro == 0 {
 		return Result{}, violation(fmt.Errorf("%w: zero fee ceiling", ErrMissingConfig))
@@ -206,7 +222,15 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 		return Result{}, violation(err)
 	}
 
-	payer := crypto.PubkeyToAddress(cfg.Key.PublicKey)
+	var payer common.Address
+	if cfg.Remote != nil {
+		payer = cfg.Remote.Address()
+		if payer == (common.Address{}) {
+			return Result{}, violation(fmt.Errorf("%w: the remote signer names no account", ErrMissingConfig))
+		}
+	} else {
+		payer = crypto.PubkeyToAddress(cfg.Key.PublicKey)
+	}
 	merchant := common.Address(p.Recipient)
 	asset := common.Address(cfg.Net.USDC)
 
@@ -331,9 +355,15 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 			"  Nothing was signed. Nothing was broadcast. No funds moved.", err))
 	}
 	say("\nguard:     PASS: the transaction matches the authorized payment\n")
+	signingHash := signer.Hash(tx)
 	if d.DryRun {
 		say("dry run:   stopping before the signature, as asked.\n")
-		return Result{Payer: payer}, nil
+		return Result{SigningHash: signingHash, Payer: payer}, nil
+	}
+	if cfg.BeforeSign != nil {
+		if err := cfg.BeforeSign(signingHash); err != nil {
+			return Result{}, unavailable(fmt.Errorf("before signing: %w; nothing was signed", err))
+		}
 	}
 
 	// ── 9. Sign, then re-check ─────────────────────────────────────────────
@@ -345,9 +375,22 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 	if !now().Before(p.NotAfter) {
 		return Result{}, violation(fmt.Errorf("%w; nothing was signed", ErrExpired))
 	}
-	signed, err := types.SignTx(tx, signer, signKey)
-	if err != nil {
-		return Result{}, unavailable(fmt.Errorf("sign: %w", err))
+	var signed *types.Transaction
+	if cfg.Remote != nil {
+		// C1: the provider signs without broadcasting; everything it returns is
+		// decoded and re-checked below before this process broadcasts it.
+		signed, err = remoteSign(ctx, cfg.Remote, tx)
+		if err != nil {
+			return Result{}, err
+		}
+		if !now().Before(p.NotAfter) {
+			return Result{}, violation(fmt.Errorf("%w while the remote signer answered; nothing was broadcast", ErrExpired))
+		}
+	} else {
+		signed, err = types.SignTx(tx, signer, signKey)
+		if err != nil {
+			return Result{}, unavailable(fmt.Errorf("sign: %w", err))
+		}
 	}
 	sender, err := types.Sender(signer, signed)
 	if err != nil {
@@ -373,11 +416,11 @@ func run(ctx context.Context, cfg Config, p Payment, d Demo) (Result, error) {
 	defer cancel()
 	receipt, err := bind.WaitMined(waitCtx, cfg.Client, signed)
 	if err != nil {
-		return Result{TxHash: signed.Hash(), Payer: payer}, unavailable(fmt.Errorf("broadcast %s but NOT confirmed within %s: %w\n"+
+		return Result{SigningHash: signingHash, TxHash: signed.Hash(), Payer: payer}, unavailable(fmt.Errorf("broadcast %s but NOT confirmed within %s: %w\n"+
 			"  The transaction may still land. Check the explorer before retrying.", signed.Hash().Hex(), confirm, err))
 	}
 	if receipt.Status != types.ReceiptStatusSuccessful {
-		return Result{TxHash: signed.Hash(), Payer: payer}, unavailable(fmt.Errorf("transaction %s reverted on chain (status %d, gas used %d)", signed.Hash().Hex(), receipt.Status, receipt.GasUsed))
+		return Result{SigningHash: signingHash, TxHash: signed.Hash(), Payer: payer}, unavailable(fmt.Errorf("transaction %s reverted on chain (status %d, gas used %d)", signed.Hash().Hex(), receipt.Status, receipt.GasUsed))
 	}
-	return Result{TxHash: signed.Hash(), Block: receipt.BlockNumber.Uint64(), GasUsed: receipt.GasUsed, Payer: payer}, nil
+	return Result{SigningHash: signingHash, TxHash: signed.Hash(), Block: receipt.BlockNumber.Uint64(), GasUsed: receipt.GasUsed, Payer: payer}, nil
 }
