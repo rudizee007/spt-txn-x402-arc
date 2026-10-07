@@ -56,6 +56,7 @@ type fakeCircle struct {
 	rawReply    string
 	alterTx     func(*types.DynamicFeeTx)
 	alterTyped  func(map[string]interface{})
+	txHashMode  string // "" correct, "omit", "null", "wrong"
 }
 
 func newFake(t *testing.T) *fakeCircle {
@@ -152,8 +153,18 @@ func (f *fakeCircle) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		enc, _ := signed.MarshalBinary()
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]string{
-			"signature": "0x00", "signedTransaction": "0x" + hex.EncodeToString(enc), "txHash": signed.Hash().Hex()}})
+		data := map[string]interface{}{"signature": "0x00", "signedTransaction": "0x" + hex.EncodeToString(enc)}
+		switch f.txHashMode {
+		case "":
+			data["txHash"] = signed.Hash().Hex()
+		case "null":
+			data["txHash"] = nil
+		case "wrong":
+			h := signed.Hash()
+			h[31] ^= 1
+			data["txHash"] = h.Hex()
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": data})
 	case PathSignTypedData:
 		var doc map[string]interface{}
 		if err := json.Unmarshal([]byte(body["data"]), &doc); err != nil {
@@ -323,6 +334,37 @@ func TestTypedDataFallback(t *testing.T) {
 		}
 		if !tc.ok && !errors.Is(err, eip3009.ErrViolation) {
 			t.Errorf("%s: accepted", tc.name)
+		}
+	}
+}
+
+// txHash is optional in Circle's published SDK types (V-3 open). Absent or null:
+// accepted, the locally computed hash is authoritative. Present: must match.
+func TestProviderTxHashOptionalButBinding(t *testing.T) {
+	for _, c := range []struct {
+		mode string
+		ok   bool
+	}{{"omit", true}, {"null", true}, {"", true}, {"wrong", false}} {
+		f := newFake(t)
+		f.txHashMode = c.mode
+		w := f.wallet0(t)
+		net := evm.ArcTestnet()
+		chain := arcpaytest.New(net.ChainID)
+		t.Cleanup(chain.Close)
+		cl, err := ethclient.Dial(chain.URL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rcpt := evm.MustParseAddress("0x79A34Cc563f848f626038Ff312CCEBfb5374971d")
+		res, err := arcpay.Settle(context.Background(), arcpay.Config{Net: net, Client: cl, Remote: w, MaxFeeMicro: 50_000, ConfirmTimeout: 5 * time.Second},
+			arcpay.Payment{Authorization: "1:ab", Recipient: rcpt, PayToTransport: evm.AccountIDBase58(rcpt), AssetTransport: evm.AccountIDBase58(net.USDC),
+				AmountMicro: "500000", NotAfter: time.Now().Add(time.Hour)})
+		if c.ok {
+			if err != nil || len(chain.Broadcasts()) != 1 || res.TxHash != chain.Broadcasts()[0].Hash() {
+				t.Errorf("txHash %q: err=%v broadcasts=%d", c.mode, err, len(chain.Broadcasts()))
+			}
+		} else if !errors.Is(err, arcpay.ErrRemoteHash) || len(chain.Broadcasts()) != 0 {
+			t.Errorf("wrong txHash: err=%v broadcasts=%d", err, len(chain.Broadcasts()))
 		}
 	}
 }

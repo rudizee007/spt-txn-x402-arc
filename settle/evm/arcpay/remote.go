@@ -22,8 +22,11 @@ type RemoteSigner interface {
 	Address() common.Address
 	// SignTransaction signs unsigned, an EIP-1559 transaction in its unsigned
 	// serialization (UnsignedBytes). It returns the signed transaction's
-	// EIP-2718 encoding and the transaction hash the provider reports.
-	SignTransaction(ctx context.Context, unsigned []byte) (signed []byte, reportedHash common.Hash, err error)
+	// EIP-2718 encoding and the transaction hash the provider reports, or nil
+	// if the provider reports none. The hash Settle computes from the decoded
+	// transaction is the authoritative one either way; a reported hash is only
+	// a cross-check, and one that disagrees is refused.
+	SignTransaction(ctx context.Context, unsigned []byte) (signed []byte, reportedHash *common.Hash, err error)
 }
 
 // Errors specific to a remote signature.
@@ -52,7 +55,8 @@ func UnsignedBytes(tx *types.Transaction) ([]byte, error) {
 
 // remoteSign asks the remote signer for a signature and decodes the result.
 // It refuses an undecodable answer, a non-dynamic-fee type, and a reported hash
-// that does not match what was returned. The caller re-checks every field.
+// that does not match what was returned; an unreported hash is accepted. The
+// caller re-checks every field.
 func remoteSign(ctx context.Context, r RemoteSigner, tx *types.Transaction) (*types.Transaction, error) {
 	unsigned, err := UnsignedBytes(tx)
 	if err != nil {
@@ -66,7 +70,10 @@ func remoteSign(ctx context.Context, r RemoteSigner, tx *types.Transaction) (*ty
 	if err := signed.UnmarshalBinary(raw); err != nil || signed.Type() != types.DynamicFeeTxType {
 		return nil, violation(fmt.Errorf("%w (%v)", ErrRemoteEncoded, err))
 	}
-	if signed.Hash() != reported {
+	// An absent hash weakens nothing: the transaction is decoded, its sender
+	// recovered, every field re-checked and its hash computed here. A hash that
+	// is reported must agree; an all-zero one is reported, not absent.
+	if reported != nil && signed.Hash() != *reported {
 		return nil, violation(fmt.Errorf("%w: reported %s, returned %s", ErrRemoteHash, reported.Hex(), signed.Hash().Hex()))
 	}
 	return signed, nil

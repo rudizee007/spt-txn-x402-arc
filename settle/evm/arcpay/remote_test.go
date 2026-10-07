@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm"
+	"github.com/rudizee007/spt-txn-x402-arc/settle/evm/arcpay/arcpaytest"
 )
 
 // simProvider plays a wallet provider's sign-transaction endpoint (SPEC-ARC-M3
@@ -28,29 +29,30 @@ type simProvider struct {
 	chain  *big.Int
 	calls  int
 	seen   []byte
-	alter  func(*types.DynamicFeeTx)                             // rebuild the transaction before signing
-	signer *ecdsa.PrivateKey                                     // sign with another key
-	output func(signed *types.Transaction) ([]byte, common.Hash) // replace the answer
+	alter  func(*types.DynamicFeeTx)                              // rebuild the transaction before signing
+	signer *ecdsa.PrivateKey                                      // sign with another key
+	output func(signed *types.Transaction) ([]byte, *common.Hash) // replace the answer
 	delay  time.Duration
+	fake   *arcpaytest.Fake // the endpoint broadcasts reach
 	err    error
 }
 
 func (p *simProvider) Address() common.Address { return crypto.PubkeyToAddress(p.key.PublicKey) }
 
-func (p *simProvider) SignTransaction(ctx context.Context, unsigned []byte) ([]byte, common.Hash, error) {
+func (p *simProvider) SignTransaction(ctx context.Context, unsigned []byte) ([]byte, *common.Hash, error) {
 	p.calls++
 	p.seen = append([]byte(nil), unsigned...)
 	if p.delay > 0 {
 		time.Sleep(p.delay)
 	}
 	if p.err != nil {
-		return nil, common.Hash{}, p.err
+		return nil, nil, p.err
 	}
 	// Decode the unsigned form the way a provider would: as a transaction
 	// with an empty signature.
 	tx, err := decodeUnsigned(unsigned)
 	if err != nil {
-		return nil, common.Hash{}, err
+		return nil, nil, err
 	}
 	inner := &types.DynamicFeeTx{ChainID: tx.ChainId(), Nonce: tx.Nonce(), GasTipCap: tx.GasTipCap(), GasFeeCap: tx.GasFeeCap(),
 		Gas: tx.Gas(), To: tx.To(), Value: tx.Value(), Data: tx.Data(), AccessList: tx.AccessList()}
@@ -63,14 +65,15 @@ func (p *simProvider) SignTransaction(ctx context.Context, unsigned []byte) ([]b
 	}
 	signed, err := types.SignNewTx(k, types.LatestSignerForChainID(inner.ChainID), inner)
 	if err != nil {
-		return nil, common.Hash{}, err
+		return nil, nil, err
 	}
 	if p.output != nil {
 		raw, h := p.output(signed)
 		return raw, h, nil
 	}
 	raw, _ := signed.MarshalBinary()
-	return raw, signed.Hash(), nil
+	h := signed.Hash()
+	return raw, &h, nil
 }
 
 // decodeUnsigned reads 0x02 || rlp(9 fields) by appending an empty signature.
@@ -98,7 +101,7 @@ func decodeUnsigned(b []byte) (*types.Transaction, error) {
 func remoteSetup(t *testing.T) (*simProvider, Config, Payment, func() int) {
 	t.Helper()
 	fake, cfg, p := setup(t)
-	prov := &simProvider{key: cfg.Key, chain: new(big.Int).SetUint64(cfg.Net.ChainID)}
+	prov := &simProvider{key: cfg.Key, chain: new(big.Int).SetUint64(cfg.Net.ChainID), fake: fake}
 	cfg.Key = nil
 	cfg.Remote = prov
 	return prov, cfg, p, func() int { return len(fake.Broadcasts()) }
@@ -164,19 +167,26 @@ func TestRemote_HostileProviderIsRefused(t *testing.T) {
 		},
 		"signed by another key": func(p *simProvider) { p.signer = stranger },
 		"reported hash differs": func(p *simProvider) {
-			p.output = func(s *types.Transaction) ([]byte, common.Hash) {
+			p.output = func(s *types.Transaction) ([]byte, *common.Hash) {
 				raw, _ := s.MarshalBinary()
-				return raw, common.Hash{1}
+				return raw, &common.Hash{1}
+			}
+		},
+		"reported hash all zero": func(p *simProvider) {
+			p.output = func(s *types.Transaction) ([]byte, *common.Hash) {
+				raw, _ := s.MarshalBinary()
+				return raw, &common.Hash{}
 			}
 		},
 		"garbage returned": func(p *simProvider) {
-			p.output = func(s *types.Transaction) ([]byte, common.Hash) { return []byte{0x02, 0xc0}, common.Hash{} }
+			p.output = func(s *types.Transaction) ([]byte, *common.Hash) { return []byte{0x02, 0xc0}, nil }
 		},
 		"legacy transaction returned": func(p *simProvider) {
-			p.output = func(s *types.Transaction) ([]byte, common.Hash) {
+			p.output = func(s *types.Transaction) ([]byte, *common.Hash) {
 				l, _ := types.SignNewTx(p.key, types.HomesteadSigner{}, &types.LegacyTx{Nonce: s.Nonce(), GasPrice: s.GasFeeCap(), Gas: s.Gas(), To: s.To(), Data: s.Data()})
 				raw, _ := l.MarshalBinary()
-				return raw, l.Hash()
+				h := l.Hash()
+				return raw, &h
 			}
 		},
 	}
@@ -241,3 +251,45 @@ func TestRemote_ConfigurationIsExactlyOneSigner(t *testing.T) {
 }
 
 func rlpDecode(b []byte, v interface{}) error { return rlp.DecodeBytes(b, v) }
+
+// The provider's transaction hash is optional and only a cross-check: the hash
+// of the decoded, re-checked transaction is the one that is broadcast and
+// recorded (SPEC-ARC-M3 V-3, owner ruling on txHash).
+func TestRemote_ProviderTxHashIsACrossCheckOnly(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		output func(*types.Transaction) ([]byte, *common.Hash)
+		ok     bool
+	}{
+		{"absent", func(s *types.Transaction) ([]byte, *common.Hash) { raw, _ := s.MarshalBinary(); return raw, nil }, true},
+		{"correct", func(s *types.Transaction) ([]byte, *common.Hash) {
+			raw, _ := s.MarshalBinary()
+			h := s.Hash()
+			return raw, &h
+		}, true},
+		{"incorrect", func(s *types.Transaction) ([]byte, *common.Hash) {
+			raw, _ := s.MarshalBinary()
+			h := s.Hash()
+			h[0] ^= 1
+			return raw, &h
+		}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			prov, cfg, p, sent := remoteSetup(t)
+			prov.output = c.output
+			res, err := Settle(context.Background(), cfg, p)
+			if !c.ok {
+				if !errors.Is(err, ErrViolation) || !errors.Is(err, ErrRemoteHash) || sent() != 0 {
+					t.Fatalf("incorrect hash: err=%v broadcasts=%d", err, sent())
+				}
+				return
+			}
+			if err != nil || sent() != 1 {
+				t.Fatalf("err=%v broadcasts=%d", err, sent())
+			}
+			if res.TxHash == (common.Hash{}) || res.TxHash != prov.fake.Broadcasts()[0].Hash() {
+				t.Fatal("the recorded hash is not the hash of the broadcast transaction")
+			}
+		})
+	}
+}

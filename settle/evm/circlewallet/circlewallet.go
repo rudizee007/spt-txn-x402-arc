@@ -173,25 +173,30 @@ func redact(s, secret string) string {
 
 // SignTransaction asks the wallet to sign an unsigned EIP-1559 transaction
 // without broadcasting it, and returns the signed transaction and the hash the
-// provider reports. arcpay re-checks both.
-func (w *Wallet) SignTransaction(ctx context.Context, unsigned []byte) ([]byte, common.Hash, error) {
+// provider reports, or nil if it reports none (txHash is optional in Circle's
+// published SDK types; V-3 remains open). arcpay re-checks both.
+func (w *Wallet) SignTransaction(ctx context.Context, unsigned []byte) ([]byte, *common.Hash, error) {
 	var data struct {
-		Signature         string `json:"signature"`
-		SignedTransaction string `json:"signedTransaction"`
-		TxHash            string `json:"txHash"`
+		Signature         string  `json:"signature"`
+		SignedTransaction string  `json:"signedTransaction"`
+		TxHash            *string `json:"txHash"` // absent and null are both "not reported"
 	}
 	if err := w.post(ctx, PathSignTx, map[string]string{"rawTransaction": "0x" + hex.EncodeToString(unsigned)}, &data); err != nil {
-		return nil, common.Hash{}, err
+		return nil, nil, err
 	}
 	signed, err := hex0x(data.SignedTransaction, 0)
 	if err != nil {
-		return nil, common.Hash{}, fmt.Errorf("%w: signedTransaction: %v", ErrResponse, err)
+		return nil, nil, fmt.Errorf("%w: signedTransaction: %v", ErrResponse, err)
 	}
-	h, err := hex0x(data.TxHash, 32)
+	if data.TxHash == nil {
+		return signed, nil, nil
+	}
+	h, err := hex0x(*data.TxHash, 32)
 	if err != nil {
-		return nil, common.Hash{}, fmt.Errorf("%w: txHash: %v", ErrResponse, err)
+		return nil, nil, fmt.Errorf("%w: txHash: %v", ErrResponse, err)
 	}
-	return signed, common.BytesToHash(h), nil
+	reported := common.BytesToHash(h)
+	return signed, &reported, nil
 }
 
 // SignTypedData asks the wallet to sign EIP-712 typed data (the C4 fallback)
