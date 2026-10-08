@@ -28,6 +28,7 @@ import (
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm"
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm/arcpay"
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm/circlewallet"
+	"github.com/rudizee007/spt-txn-x402-arc/x402v2"
 )
 
 // minAuthLifetime is this gateway's OPERATIONAL minimum for
@@ -230,8 +231,14 @@ func parseRSAPublicKey(b []byte) (*rsa.PublicKey, error) {
 // buildM3 opens the correlation file next to the log, verifies it against the
 // log, and assembles the M3 server settings. payKey or wallet is the signer
 // (both nil in evaluate-only mode).
-func (f *m3Flags) buildM3(mode, logPath string, log *translog.Log, logKey ed25519.PrivateKey, net evm.ArcNetwork,
+func (f *m3Flags) buildM3(mode, logPath string, log *translog.Log, logKey ed25519.PrivateKey, cp capability,
 	payKey *ecdsa.PrivateKey, wallet *circlewallet.Wallet) (*m3, error) {
+	net := cp.Net
+	// The EIP-3009 rail compares the resource server's resource.url with the
+	// human-approved one; without it the rail cannot validate requirements.
+	if f.rail == railEIP3009 && cp.ResourceURL == "" {
+		return nil, fmt.Errorf("%w: -rail eip3009 needs resource_url in the capability file", arcpay.ErrViolation)
+	}
 	corr, err := correlation.Open(logPath+".correlation", logKey.Public().(ed25519.PublicKey))
 	if err != nil {
 		return nil, err
@@ -257,6 +264,7 @@ func (f *m3Flags) buildM3(mode, logPath string, log *translog.Log, logKey ed2551
 	if f.rail == railEIP3009 {
 		m.domain = eip3009.Domain{Name: f.domainName, Version: f.domainVersion, ChainID: net.ChainID, VerifyingContract: net.USDC}
 		m.maxLife = f.maxLife
+		m.x402 = x402v2.Config{Network: net.CAIP2, ResourceURL: cp.ResourceURL, MaxTimeoutCeiling: maxTimeoutCeiling}
 		switch {
 		case payKey != nil:
 			m.payer = evm.Address(crypto.PubkeyToAddress(payKey.PublicKey))

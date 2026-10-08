@@ -12,7 +12,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rudizee007/spt-txn-x402-arc/settle/evm"
 )
@@ -23,20 +25,23 @@ type capability struct {
 	Net         evm.ArcNetwork
 	Recipient   evm.Address
 	Resource    string
+	ResourceURL string // optional; required by the EIP-3009 rail (SPEC-ARC-M3 §4.1.5)
 	MaxMicro    uint64
 	MaxPayments int
 	ExpiresAt   time.Time
 }
 
 // capabilityFile is the on-disk form. Every field is required except
-// max_payments, which defaults to 1.
+// max_payments, which defaults to 1, and resource_url, which only the EIP-3009
+// rail requires.
 type capabilityFile struct {
-	Network        string  `json:"network"`
-	Recipient      string  `json:"recipient"`
-	Resource       string  `json:"resource"`
-	MaxAmountMicro *uint64 `json:"max_amount_micro"`
-	MaxPayments    *int    `json:"max_payments"`
-	ExpiresAt      string  `json:"expires_at"`
+	Network        string          `json:"network"`
+	Recipient      string          `json:"recipient"`
+	Resource       string          `json:"resource"`
+	ResourceURL    json.RawMessage `json:"resource_url"` // absent, or a string; null decodes to "" and is refused
+	MaxAmountMicro *uint64         `json:"max_amount_micro"`
+	MaxPayments    *int            `json:"max_payments"`
+	ExpiresAt      string          `json:"expires_at"`
 }
 
 var errCapability = errors.New("capability refused")
@@ -75,6 +80,15 @@ func parseCapability(r io.Reader, now time.Time) (capability, error) {
 	if f.Resource == "" {
 		return capability{}, fmt.Errorf("%w: resource is required", errCapability)
 	}
+	var resourceURL string
+	if f.ResourceURL != nil {
+		if err := json.Unmarshal(f.ResourceURL, &resourceURL); err != nil {
+			return capability{}, fmt.Errorf("%w: resource_url must be a string", errCapability)
+		}
+		if err := checkResourceURL(resourceURL); err != nil {
+			return capability{}, fmt.Errorf("%w: resource_url: %v", errCapability, err)
+		}
+	}
 	if f.MaxAmountMicro == nil || *f.MaxAmountMicro == 0 {
 		return capability{}, fmt.Errorf("%w: max_amount_micro is required and must be positive", errCapability)
 	}
@@ -96,7 +110,7 @@ func parseCapability(r io.Reader, now time.Time) (capability, error) {
 		return capability{}, fmt.Errorf("%w: expired at %s", errCapability, exp.Format(time.RFC3339))
 	}
 	return capability{
-		Net: net, Recipient: rcpt, Resource: f.Resource,
+		Net: net, Recipient: rcpt, Resource: f.Resource, ResourceURL: resourceURL,
 		MaxMicro: *f.MaxAmountMicro, MaxPayments: maxPayments, ExpiresAt: exp,
 	}, nil
 }
@@ -193,7 +207,7 @@ func syncDir(dir string) error {
 // duplicate win, so {"recipient": A, "Recipient": B} decodes to B while a person
 // reading the file sees A. exactKeys refuses both before the file is decoded.
 var capabilityKeys = map[string]bool{
-	"network": true, "recipient": true, "resource": true,
+	"network": true, "recipient": true, "resource": true, "resource_url": true,
 	"max_amount_micro": true, "max_payments": true, "expires_at": true,
 }
 
@@ -226,6 +240,24 @@ func exactKeys(raw []byte) error {
 		var skip json.RawMessage
 		if err := dec.Decode(&skip); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// checkResourceURL is the capability's authenticated resource URL: https, at
+// most 2048 bytes, no whitespace or control characters. It is compared exactly
+// with the resource server's resource.url; it is never normalized.
+func checkResourceURL(u string) error {
+	switch {
+	case !strings.HasPrefix(u, "https://") || len(u) == len("https://"):
+		return errors.New("must be an https URL")
+	case len(u) > 2048:
+		return errors.New("longer than 2048 bytes")
+	}
+	for _, r := range u {
+		if r <= 0x20 || r == 0x7f || r == utf8.RuneError {
+			return errors.New("contains whitespace, a control character or invalid UTF-8")
 		}
 	}
 	return nil

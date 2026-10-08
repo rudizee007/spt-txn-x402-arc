@@ -62,7 +62,8 @@ type server struct {
 	used    *int // ALLOWs issued under this capability; shared with the policy
 	out     io.Writer
 	diag    io.Writer
-	m3      *m3 // SPEC-ARC-M3 mode; nil runs the M2 gateway unchanged
+	m3      *m3             // SPEC-ARC-M3 mode; nil runs the M2 gateway unchanged
+	release *pendingRelease // a completed payload the reply being answered carries
 }
 
 // countingPolicy is the capability's policy: the approved payment shape
@@ -103,16 +104,18 @@ type rpcResp struct {
 	Error   *rpcErr         `json:"error,omitempty"`
 }
 
-func (s *server) write(v interface{}) {
+func (s *server) write(v interface{}) error {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return
+		return err
 	}
 	if _, err := s.out.Write(append(b, '\n')); err != nil {
 		// The client cannot receive the reply. Say so where an operator looks;
 		// the decision, if any, is already recorded.
 		_, _ = fmt.Fprintf(s.diag, "protocol write failed: %v\n", err)
+		return err
 	}
+	return nil
 }
 
 func (s *server) serve(ctx context.Context, in io.Reader) error {
@@ -136,7 +139,7 @@ func (s *server) serve(ctx context.Context, in io.Reader) error {
 
 func (s *server) handle(ctx context.Context, req rpcReq) {
 	isRequest := len(req.ID) > 0 // requests have an id; notifications don't
-	reply := func(result interface{}) { s.write(rpcResp{JSONRPC: "2.0", ID: req.ID, Result: result}) }
+	reply := func(result interface{}) error { return s.write(rpcResp{JSONRPC: "2.0", ID: req.ID, Result: result}) }
 	switch req.Method {
 	case "initialize":
 		ver := "2024-11-05"
@@ -154,7 +157,24 @@ func (s *server) handle(ctx context.Context, req rpcReq) {
 	case "tools/list":
 		reply(s.toolsList())
 	case "tools/call":
-		reply(s.toolsCall(ctx, req.Params))
+		s.release = nil
+		result := s.toolsCall(ctx, req.Params)
+		if rel := s.release; rel != nil {
+			// SPEC-ARC-M3 §6.3: the completion record is already persisted; the
+			// payload leaves the process only in this write.
+			s.release = nil
+			_, _ = fmt.Fprintf(s.diag, "release attempted: log entry %s, correlation record %d (completion %d), payload_sha256 %x\n",
+				rel.locator, rel.refSeq, rel.completedSeq, rel.sha)
+			if err := reply(result); err != nil {
+				_, _ = fmt.Fprintf(s.diag, "release outcome unknown: log entry %s, correlation record %d: the reply write failed (%v); "+
+					"the payload may or may not have left this process. Signing is not retried.\n", rel.locator, rel.refSeq, err)
+			} else {
+				_, _ = fmt.Fprintf(s.diag, "release written: log entry %s, correlation record %d; receipt by the agent is not established\n",
+					rel.locator, rel.refSeq)
+			}
+		} else {
+			reply(result)
+		}
 		// The checkpoint runs once the reply is written, so it never delays
 		// the answer or a payment toward its expiry (§5).
 		if s.entered {
@@ -253,6 +273,11 @@ func (s *server) toolsList() interface{} {
 		props["payment_id"] = map[string]interface{}{"type": "string", "description": "a fresh 32-byte identifier for this payment, 64 lowercase hex characters; a repeated one is refused"}
 		props["server_identity"] = map[string]interface{}{"type": "string", "description": "this gateway's server identity, exactly: " + s.m3.identity}
 		required = append(required, "payment_id", "server_identity")
+		if s.m3.rail == railEIP3009 {
+			props["x402_accepted"] = map[string]interface{}{"type": "object", "description": "the resource server's x402 v2 payment requirements entry being paid, exactly as it published it (scheme, network, asset, amount, payTo, maxTimeoutSeconds, extra)"}
+			props["x402_resource"] = map[string]interface{}{"type": "object", "description": "the resource server's x402 v2 resource object (url, and optionally description and mimeType)"}
+			required = append(required, "x402_accepted", "x402_resource")
+		}
 	}
 	return map[string]interface{}{
 		"tools": []interface{}{
@@ -295,7 +320,11 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 	if s.m3 != nil {
 		required = append(required, m3Args...)
 	}
-	tc, err := parseToolCall(params, required)
+	var objects []string
+	if s.m3 != nil && s.m3.rail == railEIP3009 {
+		objects = eip3009Objects
+	}
+	tc, err := parseToolCall(params, required, objects)
 	if err != nil {
 		return s.reply("DENY_VIOLATION: "+err.Error(), true)
 	}
@@ -363,7 +392,7 @@ func (s *server) toolsCall(ctx context.Context, params json.RawMessage) interfac
 			"Evaluate-only: this server holds no payment key; nothing was signed or sent.", r.LogEntry), false)
 	}
 	if s.m3 != nil && s.m3.rail == railEIP3009 {
-		return s.reply(s.authorizeEIP3009(ctx, r.LogEntry, digest, paymentID, to, micro, expiry))
+		return s.reply(s.authorizeEIP3009(ctx, r.LogEntry, digest, paymentID, to, micro, expiry, tc.Objects))
 	}
 	if s.settle == nil {
 		return s.reply(fmt.Sprintf("AUTHORIZED (log entry %s), but this server has no settler; nothing was signed or sent.", r.LogEntry), true)

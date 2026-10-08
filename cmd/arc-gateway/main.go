@@ -206,7 +206,7 @@ func main() {
 	}
 
 	if m3f.on() {
-		m, err := m3f.buildM3(mode, st.path, log, logKey, cap.Net, payKey, wallet)
+		m, err := m3f.buildM3(mode, st.path, log, logKey, cap, payKey, wallet)
 		if err != nil {
 			fatal(err)
 		}

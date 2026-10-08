@@ -170,7 +170,7 @@ func TestBuildM3VerifiesTheCorrelationFileAgainstTheLog(t *testing.T) {
 	}
 	logPath := filepath.Join(t.TempDir(), "log.json")
 	f := m3Flags{identity: identity, rail: railTransfer}
-	m, err := f.buildM3(modeEvaluate, logPath, log, logKey, evm.ArcTestnet(), nil, nil)
+	m, err := f.buildM3(modeEvaluate, logPath, log, logKey, capability{Net: evm.ArcTestnet()}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestBuildM3VerifiesTheCorrelationFileAgainstTheLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.corr.Close()
-	if m, err := f.buildM3(modeEvaluate, logPath, log, logKey, evm.ArcTestnet(), nil, nil); err != nil {
+	if m, err := f.buildM3(modeEvaluate, logPath, log, logKey, capability{Net: evm.ArcTestnet()}, nil, nil); err != nil {
 		t.Fatalf("a matching file was refused: %v", err)
 	} else {
 		m.corr.Close()
@@ -192,7 +192,7 @@ func TestBuildM3VerifiesTheCorrelationFileAgainstTheLog(t *testing.T) {
 	if _, err := other.Append(logKey, translog.Allow, [32]byte{2}, t0.Unix()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.buildM3(modeEvaluate, logPath, other, logKey, evm.ArcTestnet(), nil, nil); !errors.Is(err, correlation.ErrCorrupt) {
+	if _, err := f.buildM3(modeEvaluate, logPath, other, logKey, capability{Net: evm.ArcTestnet()}, nil, nil); !errors.Is(err, correlation.ErrCorrupt) {
 		t.Fatalf("a correlation file for another log was accepted: %v", err)
 	}
 }

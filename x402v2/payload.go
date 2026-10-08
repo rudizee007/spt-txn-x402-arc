@@ -76,6 +76,24 @@ func refuse(format string, a ...any) error {
 	return fmt.Errorf("%w: "+format, append([]any{ErrRequirements}, a...)...)
 }
 
+// Check validates the requirements against the guarded authorization and the
+// configuration without a signature. The gateway calls it before anything is
+// recorded or signed; Build repeats every check.
+func Check(cfg Config, b eip3009.Bound, rawAccepted, rawResource []byte) error {
+	if cfg.Network == "" || cfg.ResourceURL == "" || cfg.MaxTimeoutCeiling <= 0 {
+		return refuse("configuration incomplete")
+	}
+	auth := b.Authorization()
+	if err := b.Verify(auth); err != nil {
+		return err
+	}
+	if _, err := validateResource(cfg, rawResource); err != nil {
+		return err
+	}
+	_, _, err := validateAccepted(cfg, auth, rawAccepted)
+	return err
+}
+
 // Build validates the resource server's requirements against the guarded
 // authorization and configuration, checks the signature, and emits the
 // payload. sig is the 65-byte signature; recovered is the address the caller

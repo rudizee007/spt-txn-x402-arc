@@ -11,7 +11,7 @@ var reqArgs = []string{"to", "amount_usdc", "resource"}
 
 func TestParseToolCallAcceptsTheExactShape(t *testing.T) {
 	params := `{"name":"authorize_payment","arguments":{"to":"merchant","amount_usdc":"0.5","resource":"invoice:42"},"_meta":{"progressToken":1}}`
-	tc, err := parseToolCall([]byte(params), reqArgs)
+	tc, err := parseToolCall([]byte(params), reqArgs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestParseToolCallRefusesAmbiguousParams(t *testing.T) {
 		"argument value object":  `{"name":"authorize_payment","arguments":{"to":{"a":1},"amount_usdc":"0.5","resource":"invoice:42"}}`,
 		"argument value boolean": `{"name":"authorize_payment","arguments":{"to":"merchant","amount_usdc":"0.5","resource":true}}`,
 	} {
-		if _, err := parseToolCall([]byte(params), reqArgs); !errors.Is(err, errArgs) {
+		if _, err := parseToolCall([]byte(params), reqArgs, nil); !errors.Is(err, errArgs) {
 			t.Errorf("%s: accepted (err=%v)", name, err)
 		}
 	}
