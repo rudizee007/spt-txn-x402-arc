@@ -327,6 +327,68 @@ The chain this gives: enforcement point `intent_digest` → domain-separated
 EIP-3009 nonce → signed authorization → on-chain authorization state. The digest
 itself never appears as the nonce (M8).
 
+#### 4.1.5 The x402 v2 payment payload [owner ruling, Revision 2]
+
+The gateway produces the complete x402 v2 `PaymentPayload` (`x402v2.Build`).
+The caller does not reconstruct any payment field.
+
+**Inputs.**
+- The guarded authorization (`eip3009.Bound`) and its signature, which must pass
+  assertion 9 first.
+- The resource server's `accepted` requirements and `resource` object, as
+  received.
+- Configuration: the capability's CAIP-2 network, the separately authenticated
+  `resource_url`, and a ceiling for `maxTimeoutSeconds`.
+
+**Validated before any payload exists; a mismatch is a refusal.**
+
+| Member | Rule |
+|---|---|
+| `accepted.scheme` | exactly `"exact"` |
+| `accepted.network` | exactly the capability network, and naming the authorization's chain |
+| `accepted.asset` | a 20-byte address equal to the pinned asset contract; mixed case must be a valid EIP-55 checksum |
+| `accepted.payTo` | a 20-byte address equal to the bound recipient; same checksum rule |
+| `accepted.amount` | a canonical base-10 integer (no sign, no leading zero, no whitespace) equal to the bound value; never normalized |
+| `accepted.maxTimeoutSeconds` | an integer in `[1, ceiling]` |
+| `accepted.extra.name`, `.version` | exactly the pinned EIP-712 domain. A difference is a configuration error, never a replacement. |
+| `accepted.extra.assetTransferMethod` | absent, or exactly `"eip3009"` |
+| `resource.url` | exactly the authenticated `resource_url` |
+| `resource.description`, `.mimeType` | informational, at most 256 bytes, never used in a decision |
+| anything else | unknown or duplicate members, at any depth, are refused |
+
+**Preserved exactly.** The x402 reference resource server matches `accepted`'s
+core terms by exact, case-sensitive comparison (`x402-foundation/x402` @
+`7f2b2f1`, `go/server.go`, `paymentRequirementsMatchAccepted`). So `accepted`
+and `resource` are echoed **as received**: only insignificant whitespace is
+removed. Member order, string spellings and escapes, and number spellings are
+unchanged. Addresses are never re-cased. `authorization.to` is the server's own
+`payTo` string.
+
+**One serialization.** The payload bytes are produced once. The
+`PAYMENT-SIGNATURE` value is standard base64 of those bytes, and
+`payload_sha256` is SHA-256 of the same bytes, before base64. Nothing
+re-serializes them.
+
+**Agreement.** The signature recovers to `authorization.from` under the domain
+`accepted` states (`extra.name`/`.version`, `asset`, the chain in `network`);
+`authorization.to` is `accepted.payTo`; `authorization.value` is
+`accepted.amount`. An arc-tagged test checks this with go-ethereum's
+independent EIP-712 code, and with the reference server's matching rule
+reproduced in the test.
+
+**Provenance (option C).** The token issuer's authorization of the supplied
+requirements (through the intent digest) does **not** authenticate the
+resource server as their origin. A compromised agent can present requirements
+the server never issued. What bounds the payment is the validation above:
+every payment term must equal the capability and the bound amount, and
+`resource.url` must equal the authenticated `resource_url`. Requirements the
+server did not issue fail its own exact match, so they are not settled through
+it. Origin authentication is not provided in M3.
+
+**Recording `payload_sha256`.** Approved in principle. The recording design is
+pending owner review (§6.3). The existing correlation-record layout is
+unchanged.
+
 ### 4.2 Circle Wallets guarded signing — priority P1
 
 #### 4.2.1 Flow [C1, D]
