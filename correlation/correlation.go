@@ -20,9 +20,30 @@
 //	guarded_id                              32
 //	prev_hash = SHA-256(previous encoding)  32  (zero for the first)
 //
-// Opening a file verifies every entry (tag, layout, contiguous seq, the hash
-// chain, the signature) and refuses the whole file on any failure, including a
-// torn final entry. Standard library only.
+// Layout 0x02, "payload completion" (SPEC-ARC-M3 §6.3, owner ruling on
+// Option B), shares the same chain, tag, key and signature. It records, after
+// signing, that one EIP-3009 authorization's x402 payload was completed:
+//
+//	tag "spt-txn-arc-correlation-v1" 0x00   27
+//	layout 0x02                              1
+//	seq (LE)                                 8   position in the shared chain
+//	ref_seq (LE)                             8   the 0x01 record it completes
+//	ref_hash = SHA-256(that 0x01 encoding)  32
+//	guarded_id                              32   must equal the referenced record's
+//	payment_id                              32   must equal the referenced record's
+//	payload_sha256                          32   SHA-256 of the exact payload JSON
+//	prev_hash                               32
+//
+// A 0x02 record evidences that the payload was completed and correlated. It
+// does not evidence receipt by the resource server, settlement, or delivery;
+// and the absence of a 0x02 means only that no completion is evidenced in the
+// chain available, not that non-release is proven.
+//
+// Layout 0x01 is unchanged byte for byte (testdata/golden-v1.correlation).
+// Entries are parsed by the layout byte at offset 27. Opening a file verifies
+// every entry (tag, layout, contiguous seq, the hash chain, the signature, and
+// for 0x02 its reference) and refuses the whole file on any failure, including
+// an unknown layout and a torn final entry. Standard library only.
 package correlation
 
 import (
@@ -45,6 +66,11 @@ const (
 	// EncodedLen and EntryLen are the encoding's and the on-disk entry's sizes.
 	EncodedLen = len(Tag) + 1 + 1 + 8 + 8 + 32 + 32 + 32 + 32 + 1 + 32 + 32
 	EntryLen   = EncodedLen + ed25519.SignatureSize
+
+	// LayoutCompletion and its sizes.
+	LayoutCompletion     = 0x02
+	CompletionEncodedLen = len(Tag) + 1 + 1 + 8 + 8 + 32 + 32 + 32 + 32 + 32
+	CompletionEntryLen   = CompletionEncodedLen + ed25519.SignatureSize
 )
 
 // Rails.
@@ -59,7 +85,50 @@ var (
 	ErrCorrupt          = errors.New("correlation: file does not verify")
 	ErrDuplicatePayment = errors.New("correlation: payment_id already recorded")
 	ErrUnavailable      = errors.New("correlation: record could not be persisted")
+	// ErrDuplicateCompletion: the authorization already has its one completion.
+	ErrDuplicateCompletion = errors.New("correlation: authorization already completed")
+	// ErrReference: a completion names no completable authorization, or one
+	// whose identity does not match.
+	ErrReference = errors.New("correlation: completion reference is invalid")
 )
+
+// Completion is a layout-0x02 record. Seq and PrevHash are assigned by
+// AppendCompletion.
+type Completion struct {
+	Seq           uint64
+	RefSeq        uint64
+	RefHash       [32]byte
+	GuardedID     [32]byte
+	PaymentID     [32]byte
+	PayloadSHA256 [32]byte
+	PrevHash      [32]byte
+}
+
+// Encode is the completion's fixed-width encoding.
+func (c Completion) Encode() []byte {
+	b := make([]byte, 0, CompletionEncodedLen)
+	b = append(b, Tag...)
+	b = append(b, 0x00, LayoutCompletion)
+	b = binary.LittleEndian.AppendUint64(b, c.Seq)
+	b = binary.LittleEndian.AppendUint64(b, c.RefSeq)
+	for _, f := range [][32]byte{c.RefHash, c.GuardedID, c.PaymentID, c.PayloadSHA256, c.PrevHash} {
+		b = append(b, f[:]...)
+	}
+	return b
+}
+
+func decodeCompletion(b []byte) Completion {
+	var c Completion
+	p := len(Tag) + 2
+	c.Seq = binary.LittleEndian.Uint64(b[p:])
+	c.RefSeq = binary.LittleEndian.Uint64(b[p+8:])
+	p += 16
+	for _, f := range []*[32]byte{&c.RefHash, &c.GuardedID, &c.PaymentID, &c.PayloadSHA256, &c.PrevHash} {
+		copy(f[:], b[p:p+32])
+		p += 32
+	}
+	return c
+}
 
 // Record is one correlation. Seq and PrevHash are assigned by Append.
 type Record struct {
@@ -119,11 +188,15 @@ func decode(b []byte) (Record, error) {
 
 // File is an open correlation file.
 type File struct {
-	mu       sync.Mutex
-	f        *os.File
-	pub      ed25519.PublicKey
-	records  []Record
-	payments map[[32]byte]uint64
+	mu          sync.Mutex
+	f           *os.File
+	pub         ed25519.PublicKey
+	n           uint64   // entries in the chain, of either layout
+	last        [32]byte // SHA-256 of the last entry's encoding
+	records     []Record
+	bySeq       map[uint64]int // 0x01 record seq -> index in records
+	payments    map[[32]byte]uint64
+	completions map[uint64]Completion // keyed by RefSeq
 }
 
 // Open opens (creating if absent, mode 0600) and verifies a correlation file
@@ -141,49 +214,129 @@ func Open(path string, pub ed25519.PublicKey) (*File, error) {
 		f.Close()
 		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
-	recs, err := Verify(raw, pub)
+	ch, err := VerifyChain(raw, pub)
 	if err != nil {
 		f.Close()
 		return nil, err
 	}
-	cf := &File{f: f, pub: pub, records: recs, payments: map[[32]byte]uint64{}}
-	for _, r := range recs {
+	cf := &File{f: f, pub: pub, n: ch.Entries, last: ch.Last, records: ch.Records, bySeq: map[uint64]int{},
+		payments: map[[32]byte]uint64{}, completions: map[uint64]Completion{}}
+	for i, r := range ch.Records {
+		cf.bySeq[r.Seq] = i
 		cf.payments[r.PaymentID] = r.Seq
+	}
+	for _, c := range ch.Completions {
+		cf.completions[c.RefSeq] = c
 	}
 	return cf, nil
 }
 
-// Verify checks a whole file's bytes and returns its records. Any failure
-// refuses the whole file.
+// Chain is a verified file.
+type Chain struct {
+	Records     []Record     // layout 0x01, in chain order
+	Completions []Completion // layout 0x02, in chain order
+	Entries     uint64       // entries of both layouts
+	Last        [32]byte     // SHA-256 of the last entry's encoding (zero if empty)
+}
+
+// Verify checks a whole file's bytes and returns its layout-0x01 records. Any
+// failure refuses the whole file.
 func Verify(raw []byte, pub ed25519.PublicKey) ([]Record, error) {
-	if len(raw)%EntryLen != 0 {
-		return nil, fmt.Errorf("%w: %d bytes is not a whole number of entries (torn write?)", ErrCorrupt, len(raw))
+	ch, err := VerifyChain(raw, pub)
+	if err != nil {
+		return nil, err
 	}
-	var recs []Record
-	var prev [32]byte
+	return ch.Records, nil
+}
+
+// VerifyChain checks a whole file of mixed 0x01 and 0x02 entries. It refuses:
+// an unknown layout; a torn entry; a seq gap; a broken chain; a bad signature;
+// a repeated payment_id; and a completion that does not reference an earlier
+// EIP-3009 record with the same encoding hash, guarded_id and payment_id, or
+// that repeats a completion.
+func VerifyChain(raw []byte, pub ed25519.PublicKey) (Chain, error) {
+	var ch Chain
+	bySeq := map[uint64]int{}
 	seen := map[[32]byte]bool{}
-	for i := 0; i < len(raw); i += EntryLen {
-		enc, sig := raw[i:i+EncodedLen], raw[i+EncodedLen:i+EntryLen]
-		r, err := decode(enc)
-		if err != nil {
-			return nil, err
+	done := map[uint64]bool{}
+	for off := 0; off < len(raw); {
+		n := ch.Entries
+		if len(raw)-off < len(Tag)+2 {
+			return Chain{}, fmt.Errorf("%w: entry %d is torn (%d bytes left)", ErrCorrupt, n, len(raw)-off)
 		}
-		n := uint64(i / EntryLen)
+		var encLen, entLen int
+		switch raw[off+len(Tag)+1] {
+		case Layout:
+			encLen, entLen = EncodedLen, EntryLen
+		case LayoutCompletion:
+			encLen, entLen = CompletionEncodedLen, CompletionEntryLen
+		default:
+			return Chain{}, fmt.Errorf("%w: entry %d has unknown layout 0x%02x", ErrCorrupt, n, raw[off+len(Tag)+1])
+		}
+		if len(raw)-off < entLen {
+			return Chain{}, fmt.Errorf("%w: entry %d is torn (%d of %d bytes)", ErrCorrupt, n, len(raw)-off, entLen)
+		}
+		enc, sig := raw[off:off+encLen], raw[off+encLen:off+entLen]
+		if !bytes.Equal(enc[:len(Tag)], []byte(Tag)) || enc[len(Tag)] != 0x00 {
+			return Chain{}, fmt.Errorf("%w: entry %d bad tag", ErrCorrupt, n)
+		}
+		if !ed25519.Verify(pub, enc, sig) {
+			return Chain{}, fmt.Errorf("%w: entry %d signature", ErrCorrupt, n)
+		}
+		var seq uint64
+		var prev [32]byte
+		if encLen == EncodedLen {
+			r, err := decode(enc)
+			if err != nil {
+				return Chain{}, err
+			}
+			seq, prev = r.Seq, r.PrevHash
+			if seen[r.PaymentID] {
+				return Chain{}, fmt.Errorf("%w: entry %d repeats a payment_id", ErrCorrupt, n)
+			}
+			seen[r.PaymentID] = true
+			bySeq[r.Seq] = len(ch.Records)
+			ch.Records = append(ch.Records, r)
+		} else {
+			c := decodeCompletion(enc)
+			seq, prev = c.Seq, c.PrevHash
+			if err := checkReference(c, ch.Records, bySeq, done); err != nil {
+				return Chain{}, fmt.Errorf("%w (entry %d)", err, n)
+			}
+			done[c.RefSeq] = true
+			ch.Completions = append(ch.Completions, c)
+		}
 		switch {
-		case r.Seq != n:
-			return nil, fmt.Errorf("%w: entry %d carries seq %d", ErrCorrupt, n, r.Seq)
-		case r.PrevHash != prev:
-			return nil, fmt.Errorf("%w: entry %d breaks the hash chain", ErrCorrupt, n)
-		case !ed25519.Verify(pub, enc, sig):
-			return nil, fmt.Errorf("%w: entry %d signature", ErrCorrupt, n)
-		case seen[r.PaymentID]:
-			return nil, fmt.Errorf("%w: entry %d repeats a payment_id", ErrCorrupt, n)
+		case seq != n:
+			return Chain{}, fmt.Errorf("%w: entry %d carries seq %d", ErrCorrupt, n, seq)
+		case prev != ch.Last:
+			return Chain{}, fmt.Errorf("%w: entry %d breaks the hash chain", ErrCorrupt, n)
 		}
-		seen[r.PaymentID] = true
-		prev = sha256.Sum256(enc)
-		recs = append(recs, r)
+		ch.Last = sha256.Sum256(enc)
+		ch.Entries++
+		off += entLen
 	}
-	return recs, nil
+	return ch, nil
+}
+
+// checkReference applies the completion rules against the records before it.
+func checkReference(c Completion, recs []Record, bySeq map[uint64]int, done map[uint64]bool) error {
+	// bySeq holds only the records before this entry, so a reference to a
+	// later, missing or non-0x01 entry is simply absent from it.
+	i, ok := bySeq[c.RefSeq]
+	switch {
+	case !ok:
+		return fmt.Errorf("%w: %w: names no earlier authorization record (ref %d)", ErrCorrupt, ErrReference, c.RefSeq)
+	case recs[i].Rail != RailEIP3009:
+		return fmt.Errorf("%w: %w: ref %d is not an EIP-3009 authorization", ErrCorrupt, ErrReference, c.RefSeq)
+	case recs[i].Hash() != c.RefHash:
+		return fmt.Errorf("%w: %w: ref_hash does not match record %d", ErrCorrupt, ErrReference, c.RefSeq)
+	case recs[i].GuardedID != c.GuardedID || recs[i].PaymentID != c.PaymentID:
+		return fmt.Errorf("%w: %w: guarded_id or payment_id differs from record %d", ErrCorrupt, ErrReference, c.RefSeq)
+	case done[c.RefSeq]:
+		return fmt.Errorf("%w: %w: record %d", ErrCorrupt, ErrDuplicateCompletion, c.RefSeq)
+	}
+	return nil
 }
 
 // Seen reports whether paymentID is already recorded.
@@ -194,18 +347,55 @@ func (c *File) Seen(paymentID [32]byte) bool {
 	return ok
 }
 
-// Len is the number of records.
+// Len is the number of layout-0x01 records.
 func (c *File) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.records)
 }
 
-// Records returns a copy of the records.
+// Records returns a copy of the layout-0x01 records.
 func (c *File) Records() []Record {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]Record(nil), c.records...)
+}
+
+// Completion returns the completion recorded for the authorization at refSeq.
+func (c *File) Completion(refSeq uint64) (Completion, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cp, ok := c.completions[refSeq]
+	return cp, ok
+}
+
+// write appends one signed entry and syncs. On failure the file is closed and
+// every later append fails.
+func (c *File) write(enc []byte, key ed25519.PrivateKey) error {
+	entry := append(append([]byte(nil), enc...), ed25519.Sign(key, enc)...)
+	if _, err := c.f.Write(entry); err != nil {
+		c.f.Close()
+		c.f = nil
+		return fmt.Errorf("%w: write: %v", ErrUnavailable, err)
+	}
+	if err := c.f.Sync(); err != nil {
+		c.f.Close()
+		c.f = nil
+		return fmt.Errorf("%w: sync: %v", ErrUnavailable, err)
+	}
+	c.last = sha256.Sum256(enc)
+	c.n++
+	return nil
+}
+
+func (c *File) usable(key ed25519.PrivateKey) error {
+	if c.f == nil {
+		return fmt.Errorf("%w: file is closed", ErrUnavailable)
+	}
+	if !bytes.Equal(key.Public().(ed25519.PublicKey), c.pub) {
+		return fmt.Errorf("%w: signing key does not match the file's key", ErrUnavailable)
+	}
+	return nil
 }
 
 // Append assigns Seq and PrevHash, signs the record with key, writes it and
@@ -215,35 +405,52 @@ func (c *File) Records() []Record {
 func (c *File) Append(r Record, key ed25519.PrivateKey) (Record, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.f == nil {
-		return Record{}, fmt.Errorf("%w: file is closed", ErrUnavailable)
-	}
-	if !bytes.Equal(key.Public().(ed25519.PublicKey), c.pub) {
-		return Record{}, fmt.Errorf("%w: signing key does not match the file's key", ErrUnavailable)
+	if err := c.usable(key); err != nil {
+		return Record{}, err
 	}
 	if _, dup := c.payments[r.PaymentID]; dup {
 		return Record{}, ErrDuplicatePayment
 	}
-	r.Seq = uint64(len(c.records))
-	r.PrevHash = [32]byte{}
-	if n := len(c.records); n > 0 {
-		r.PrevHash = c.records[n-1].Hash()
+	r.Seq, r.PrevHash = c.n, c.last
+	if err := c.write(r.Encode(), key); err != nil {
+		return Record{}, err
 	}
-	enc := r.Encode()
-	entry := append(enc, ed25519.Sign(key, enc)...)
-	if _, err := c.f.Write(entry); err != nil {
-		c.f.Close()
-		c.f = nil
-		return Record{}, fmt.Errorf("%w: write: %v", ErrUnavailable, err)
-	}
-	if err := c.f.Sync(); err != nil {
-		c.f.Close()
-		c.f = nil
-		return Record{}, fmt.Errorf("%w: sync: %v", ErrUnavailable, err)
-	}
+	c.bySeq[r.Seq] = len(c.records)
 	c.records = append(c.records, r)
 	c.payments[r.PaymentID] = r.Seq
 	return r, nil
+}
+
+// AppendCompletion records, after signing and before any release, that the
+// EIP-3009 authorization at refSeq produced the payload whose exact JSON bytes
+// hash to payloadSHA256. It refuses a reference that is not an earlier EIP-3009
+// record, and a second completion for the same authorization (also across
+// reopenings). It returns only after the record is synced; on a write or sync
+// failure the file is closed and the caller must not release the payload.
+func (c *File) AppendCompletion(refSeq uint64, payloadSHA256 [32]byte, key ed25519.PrivateKey) (Completion, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.usable(key); err != nil {
+		return Completion{}, err
+	}
+	i, ok := c.bySeq[refSeq]
+	if !ok {
+		return Completion{}, fmt.Errorf("%w: no authorization record %d", ErrReference, refSeq)
+	}
+	r := c.records[i]
+	if r.Rail != RailEIP3009 {
+		return Completion{}, fmt.Errorf("%w: record %d is not an EIP-3009 authorization", ErrReference, refSeq)
+	}
+	if _, dup := c.completions[refSeq]; dup {
+		return Completion{}, ErrDuplicateCompletion
+	}
+	cp := Completion{Seq: c.n, RefSeq: refSeq, RefHash: r.Hash(), GuardedID: r.GuardedID, PaymentID: r.PaymentID,
+		PayloadSHA256: payloadSHA256, PrevHash: c.last}
+	if err := c.write(cp.Encode(), key); err != nil {
+		return Completion{}, err
+	}
+	c.completions[refSeq] = cp
+	return cp, nil
 }
 
 // Close closes the file.
